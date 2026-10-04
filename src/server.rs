@@ -236,7 +236,7 @@ fn hostname() -> String {
 async fn ping(State(st): State<AppState>) -> Json<Value> {
     let tailnet_url = st.tailnet.read().unwrap().as_ref().map(|t| t.url.clone());
     Json(json!({
-        "sci-pi": true,
+        "scipi": true,
         "version": env!("CARGO_PKG_VERSION"),
         "host": hostname(),
         "tailnet_url": tailnet_url,

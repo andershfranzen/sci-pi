@@ -23,7 +23,7 @@ Clients must therefore treat the token as optional: send `Authorization` only wh
 non-empty token, and on `401` ask for one. CORS is open (no cookies), so a UI served from one
 origin can talk to any number of daemons.
 
-`GET /api/ping` is unauthenticated: `{ sci-pi: true, version, host, tailnet_url: string | null }`.
+`GET /api/ping` is unauthenticated: `{ scipi: true, version, host, tailnet_url: string | null }`.
 
 ## Types
 

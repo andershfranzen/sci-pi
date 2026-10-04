@@ -1012,7 +1012,7 @@ function sessionDiff(s: Session) {
 async function api(req: Request, url: URL): Promise<Response> {
   const path = url.pathname.slice(4); // strip /api
   const m = req.method;
-  if (path === "/ping") return json({ sci-pi: true, version: "0.2.0-mock", host: "devbox", tailnet_url: info(false).tailnet_url });
+  if (path === "/ping") return json({ scipi: true, version: "0.2.0-mock", host: "devbox", tailnet_url: info(false).tailnet_url });
 
   const auth = authorize(req, url);
   if (!auth.ok) return err(401, "unauthorized");

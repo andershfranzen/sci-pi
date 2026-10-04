@@ -50,7 +50,7 @@ impl Hub {
     async fn ping(&self, base: &str) -> Option<Value> {
         let res = self.http.get(format!("{base}/api/ping")).send().await.ok()?;
         let v: Value = res.json().await.ok()?;
-        (v["sci-pi"] == true).then_some(v)
+        (v["scipi"] == true).then_some(v)
     }
 }
 
