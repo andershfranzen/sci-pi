@@ -49,7 +49,7 @@ interface Session {
   status_message: string | null;  // error text etc.
   mode: string | null;            // current ACP mode id
   modes: { id: string; name: string; description?: string }[];
-  usage: { used: number; size: number; cost?: { amount: number; currency: string } } | null;
+  usage: { used: number; size?: number; cost?: { amount: number; currency: string } } | null;
   queued: number;                 // = queue.length
   queue: { id: string; text: string; attachments: Attachment[] }[]; // persisted; survives restarts
   config_options: ConfigOption[]; // ACP SessionConfigOption verbatim – model, effort, mode, …
@@ -68,7 +68,7 @@ interface ConfigOption {          // e.g. { id: "model", name: "Model", category
   id: string; name: string;       //        currentValue: "opus", options: [{ value, name, description }] }
   description?: string;
   category?: string;              // "mode" | "model" | "thought_level" | …
-  type: string;                   // "select" (render as a dropdown); other types: show read-only
+  type: string;                   // "select" (dropdown), "boolean" (toggle); others: read-only
   currentValue: any;
   options?: { value: any; name: string; description?: string }[];
 }
@@ -116,6 +116,12 @@ ACP `update` objects the UI should render (others can be ignored):
   (replaces the previous plan).
 - `current_mode_update`: `{ currentModeId }`.
 - `session_info_update`: `{ title? }`.
+- `config_option_update`: `{ configOptions }` replaces the options. Model-dependent Effort
+  selects and `{ id: "fast", type: "boolean", currentValue: boolean }` controls may appear or
+  disappear on model changes. Send the actual boolean, not a string, when setting Fast.
+- `usage_update`: `{ used, size?, cost? }`. `size` is omitted when the context window is
+  unknown; clients must not infer a limit. `cost` is present only for known billed API usage,
+  not inferred subscription charges.
 - `usage_update` and `available_commands_update` are **not** stored as events; they are folded
   into the `Session` object instead.
 

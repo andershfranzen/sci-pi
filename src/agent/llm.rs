@@ -4,20 +4,17 @@
 //! echoed back exactly as received (thinking blocks must round-trip unchanged). Other
 //! providers translate from that format on the way out.
 
+
+use super::models::{self, Fast, ModelInfo};
 use anyhow::{anyhow, bail, Context, Result};
 use futures::StreamExt;
 use serde_json::{json, Map, Value};
 use std::collections::HashMap;
 use std::time::Duration;
+use std::collections::HashSet;
+use std::sync::LazyLock;
+use parking_lot::Mutex;
 
-pub const ANTHROPIC_MODELS: &[(&str, &str)] = &[
-    ("claude-opus-5-5", "Claude Opus 5.5"),
-    ("claude-fable-5-1", "Claude Fable 5.1"),
-    ("claude-sonnet-5-5", "Claude Sonnet 5.5"),
-    ("claude-haiku-4-5", "Claude Haiku 4.5"),
-];
-
-pub const EFFORTS: &[&str] = &["low", "medium", "high", "xhigh", "max"];
 
 /// Streaming progress, forwarded to the client as ACP session updates.
 pub enum Delta {
@@ -33,7 +30,38 @@ pub struct Request<'a> {
     pub messages: &'a [Value],
     /// Tool definitions in Anthropic format (`name`, `description`, `input_schema`).
     pub tools: &'a [Value],
-    pub effort: &'a str,
+    pub opts: &'a Opts<'a>,
+    
+}
+
+#[derive(Clone, Copy)]
+pub struct Opts<'a> {
+    pub thinking: bool,
+    pub effort: Option<&'a str>,
+    pub fast: Option<&'a Fast>,
+    pub max_output: Option<u64>,
+    pub server_compaction: bool,
+    pub thinking_display: Option<&'a str>,
+    pub fallbacks: bool,
+}
+
+impl<'a> Opts<'a> {
+    pub fn from_info(info: &'a ModelInfo, effort: &'a str, fast: bool) -> Self {
+        let valid = |value: &str| info.efforts.iter().any(|(id, _)| id == value);
+        let effort = if valid(effort) { Some(effort) } else {
+            info.default_effort.as_deref().filter(|value| valid(value))
+                .or_else(|| info.efforts.first().map(|(id, _)| id.as_str()))
+        };
+        Self {
+            thinking: info.adaptive_thinking == Some(true),
+            effort,
+            fast: if fast { info.fast.as_ref() } else { None },
+            max_output: info.max_output,
+            server_compaction: info.server_compaction == Some(true),
+            thinking_display: info.thinking_display.as_deref(),
+            fallbacks: info.fallbacks == Some(true),
+        }
+    }
 }
 
 pub struct Response {
@@ -70,10 +98,10 @@ impl Provider {
 }
 
 /// POSTs with retries on rate limits / overload / 5xx (only before any output streamed).
-async fn post_with_retry(builder: impl Fn() -> reqwest::RequestBuilder) -> Result<reqwest::Response> {
+async fn post_with_retry(builder: impl Fn() -> Result<reqwest::RequestBuilder>) -> Result<reqwest::Response> {
     let mut delay = Duration::from_secs(2);
     for attempt in 0.. {
-        let res = builder().send().await;
+        let res = builder()?.send().await;
         match res {
             Ok(r) if r.status().is_success() => return Ok(r),
             Ok(r) => {
@@ -100,6 +128,69 @@ async fn post_with_retry(builder: impl Fn() -> reqwest::RequestBuilder) -> Resul
         delay = (delay * 2).min(Duration::from_secs(60));
     }
     unreachable!()
+}
+
+const OPTIONAL_FIELDS: &[&str] = &["fallbacks", "thinking.display", "speed", "eager_input_streaming", "service_tier"];
+static REJECTED_FIELDS: LazyLock<Mutex<HashMap<(String, String), HashSet<&'static str>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn remove_optional(body: &mut Value, field: &str) -> bool {
+    match field {
+        "thinking.display" => body.get_mut("thinking").and_then(Value::as_object_mut)
+            .and_then(|thinking| thinking.remove("display")).is_some(),
+        "eager_input_streaming" => {
+            let mut removed = false;
+            for tool in body["tools"].as_array_mut().into_iter().flatten() {
+                if let Some(tool) = tool.as_object_mut() {
+                    removed |= tool.remove(field).is_some();
+                }
+            }
+            removed
+        }
+        _ => body.as_object_mut().and_then(|body| body.remove(field)).is_some(),
+    }
+}
+
+fn rejected_optional(error: &str) -> Option<&'static str> {
+    let lower = error.to_ascii_lowercase();
+    if !(lower.starts_with("http 400") || lower.starts_with("http 422")) {
+        return None;
+    }
+    let rejection = ["unknown", "unrecognized", "unrecognised", "unsupported", "not supported",
+        "not permitted", "not allowed", "unexpected", "extra inputs", "extra fields"]
+        .iter().any(|phrase| lower.contains(phrase));
+    if !rejection { return None; }
+    OPTIONAL_FIELDS.iter().copied().find(|field| {
+        lower.contains(field) || (*field == "thinking.display" && lower.contains("display") && lower.contains("thinking"))
+    })
+}
+
+/// Compatibility retries occur only on an HTTP rejection, before a response stream is opened.
+async fn post_optional(
+    endpoint: &str,
+    model: &str,
+    mut body: Value,
+    builder: impl Fn(&Value) -> Result<reqwest::RequestBuilder>,
+) -> Result<reqwest::Response> {
+    let key = (endpoint.to_owned(), model.to_owned());
+    {
+        let remembered = REJECTED_FIELDS.lock();
+        for field in remembered.get(&key).into_iter().flatten() {
+            remove_optional(&mut body, field);
+        }
+    }
+    for _ in 0..=OPTIONAL_FIELDS.len() {
+        match post_with_retry(|| builder(&body)).await {
+            Ok(response) => return Ok(response),
+            Err(error) => {
+                let Some(field) = rejected_optional(&error.to_string()) else { return Err(error); };
+                if !remove_optional(&mut body, field) { return Err(error); }
+                REJECTED_FIELDS.lock()
+                    .entry(key.clone()).or_default().insert(field);
+            }
+        }
+    }
+    bail!("provider rejected every optional request field for {model}")
 }
 
 /// Splits a byte stream into server-sent events: `(event name, data)`.
@@ -136,15 +227,55 @@ impl Sse {
     }
 }
 
-/// Per-model request options: (thinking config, supports effort, server-side refusal fallbacks).
-fn anthropic_model_opts(model: &str) -> (Option<Value>, bool, bool) {
-    if model.starts_with("claude-haiku") {
-        return (None, false, false);
+
+
+
+
+
+
+
+
+
+
+
+fn anthropic_body(req: &Request<'_>, proxy: bool) -> Result<Value> {
+    let fallbacks = req.opts.fallbacks;
+    let tools: Vec<Value> = req.tools.iter().map(|tool| {
+        let mut tool = tool.clone();
+        if !proxy {
+            tool["eager_input_streaming"] = json!(true);
+        }
+        
+        tool
+    }).collect();
+    let mut body = json!({
+        "model": req.model,
+        "system": [{ "type": "text", "text": req.system }],
+        "max_tokens": req.opts.max_output.filter(|n| *n > 0)
+            .with_context(|| format!("{} has no output-token limit in provider metadata; refresh the provider model listing or configure metadata before using Anthropic Messages", req.model))?,
+        "tools": tools,
+    });
+    body["messages"] = json!(req.messages);
+    if req.opts.thinking {
+        body["thinking"] = json!({ "type": "adaptive" });
+        if let Some(display) = req.opts.thinking_display {
+            body["thinking"]["display"] = json!(display);
+        }
+        
     }
-    let thinking = Some(json!({ "type": "adaptive", "display": "summarized" }));
-    let fallbacks = matches!(model, "claude-fable-5-1" | "claude-opus-5-5" | "claude-opus-5" | "claude-sonnet-5-5");
-    (thinking, true, fallbacks)
+    if let Some(effort) = req.opts.effort {
+        body["output_config"] = json!({ "effort": effort });
+    }
+    if fallbacks {
+        body["fallbacks"] = json!("default");
+    }
+    if matches!(req.opts.fast, Some(Fast::AnthropicSpeed)) {
+        body["speed"] = json!("fast");
+    }
+    Ok(body)
 }
+
+
 
 async fn anthropic(
     http: &reqwest::Client,
@@ -154,48 +285,25 @@ async fn anthropic(
     req: &Request<'_>,
     on: &mut (dyn FnMut(Delta) + Send),
 ) -> Result<Response> {
-    let (thinking, effort, fallbacks) = anthropic_model_opts(req.model);
-    let fallbacks = fallbacks && !proxy;
-    // Stream tool inputs as they're generated; we validate them ourselves at block stop.
-    let tools: Vec<Value> = req
-        .tools
-        .iter()
-        .map(|t| {
-            let mut t = t.clone();
-            if !proxy {
-                t["eager_input_streaming"] = json!(true);
-            }
-            t
-        })
-        .collect();
-    let mut body = json!({
-        "model": req.model,
-        "max_tokens": 64000,
-        "stream": true,
-        "system": [{ "type": "text", "text": req.system }],
-        "messages": req.messages,
-        "tools": tools,
-        // Auto-placed on the last cacheable block: each step re-reads the whole prefix from cache.
-        "cache_control": { "type": "ephemeral" },
-    });
-    if let Some(t) = thinking {
-        body["thinking"] = t;
-    }
-    if effort {
-        body["output_config"] = json!({ "effort": req.effort });
-    }
-    if fallbacks {
-        body["fallbacks"] = json!("default");
-    }
-    let mut betas = vec![];
-    if fallbacks {
-        betas.push("server-side-fallback-2026-07-01");
-    }
-    if carries_compaction(req.messages) {
-        betas.push(COMPACTION_BETA);
-    }
+    let mut body = anthropic_body(req, proxy)?;
+    body["stream"] = json!(true);
+    // Auto-placed on the last cacheable block.
+    body["cache_control"] = json!({ "type": "ephemeral" });
     let url = format!("{}/v1/messages", base_url.trim_end_matches('/'));
-    let res = post_with_retry(|| anthropic_request(http, &url, api_key, proxy, &betas).json(&body)).await?;
+    let res = post_optional(&url, req.model, body, |body| {
+        let mut betas = vec![];
+        if body.get("fallbacks").is_some() {
+            betas.push("server-side-fallback-2026-07-01");
+        }
+        if body.get("speed").is_some() {
+            betas.push("fast-mode-2026-02-01");
+        }
+        if req.opts.server_compaction && carries_compaction(req.messages) {
+            betas.push(COMPACTION_BETA);
+        }
+        let payload = bytes::Bytes::from(serde_json::to_string(body)?);
+        Ok(anthropic_request(http, &url, api_key, proxy, &betas).body(payload))
+    }).await?;
 
     let mut blocks: Vec<Value> = vec![];
     let mut partial: HashMap<usize, String> = HashMap::new();
@@ -212,7 +320,8 @@ async fn anthropic(
                 "message_start" => usage = ev["message"]["usage"].clone(),
                 "content_block_start" => {
                     let i = ev["index"].as_u64().unwrap_or(0) as usize;
-                    let block = ev["content_block"].clone();
+                    let mut block = ev["content_block"].clone();
+                    
                     if block["type"] == "tool_use" {
                         partial.insert(i, String::new());
                         on(Delta::ToolStart {
@@ -283,11 +392,6 @@ async fn anthropic(
 
 const COMPACTION_BETA: &str = "compact-2026-09-04";
 
-/// Models that support on-demand server-side compaction.
-const SERVER_COMPACTION: &[&str] = &[
-    "claude-fable-5-1", "claude-mythos-5-1", "claude-fable-5", "claude-mythos-5", "claude-opus-5-5", "claude-opus-5",
-    "claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6", "claude-sonnet-5-5", "claude-sonnet-5", "claude-sonnet-4-6",
-];
 
 fn carries_compaction(messages: &[Value]) -> bool {
     messages.iter().any(|m| m["content"].as_array().is_some_and(|c| c.iter().any(|b| b["type"] == "compaction")))
@@ -327,9 +431,9 @@ impl Provider {
     /// everything else gets client-side "simple compaction": the model writes a summary that
     /// replaces the history, with no earlier turns or thinking replayed.
     pub async fn compact(&self, http: &reqwest::Client, req: &Request<'_>) -> Result<Compacted> {
-        if let Provider::Anthropic { api_key, base_url, proxy: false } = self {
-            if SERVER_COMPACTION.contains(&req.model) {
-                return server_compaction(http, api_key, base_url, req).await;
+        if let Provider::Anthropic { api_key, base_url, proxy } = self {
+            if req.opts.server_compaction {
+                return server_compaction(http, api_key, base_url, *proxy, req).await;
             }
         }
         let mut messages = req.messages.to_vec();
@@ -352,34 +456,19 @@ impl Provider {
     }
 }
 
-async fn server_compaction(http: &reqwest::Client, api_key: &str, base_url: &str, req: &Request<'_>) -> Result<Compacted> {
-    let (thinking, effort, _) = anthropic_model_opts(req.model);
-    // Same system and tools as the conversation's requests.
-    let tools: Vec<Value> = req
-        .tools
-        .iter()
-        .map(|t| {
-            let mut t = t.clone();
-            t["eager_input_streaming"] = json!(true);
-            t
-        })
-        .collect();
-    let mut body = json!({
-        "model": req.model,
-        "max_tokens": 32000,
-        "system": [{ "type": "text", "text": req.system }],
-        "messages": req.messages,
-        "tools": tools,
-        "compaction": { "type": "summarize", "instructions": SUMMARY_INSTRUCTIONS },
-    });
-    if let Some(t) = thinking {
-        body["thinking"] = t;
-    }
-    if effort {
-        body["output_config"] = json!({ "effort": req.effort });
-    }
+async fn server_compaction(http: &reqwest::Client, api_key: &str, base_url: &str, proxy: bool, req: &Request<'_>) -> Result<Compacted> {
+    let mut body = anthropic_body(req, proxy)?;
+    // Compaction cannot carry context_management.
+    body.as_object_mut().unwrap().remove("context_management");
+    body.as_object_mut().unwrap().remove("fallbacks");
+    body["compaction"] = json!({ "type": "summarize", "instructions": SUMMARY_INSTRUCTIONS });
     let url = format!("{}/v1/messages", base_url.trim_end_matches('/'));
-    let res = post_with_retry(|| anthropic_request(http, &url, api_key, false, &[COMPACTION_BETA]).json(&body)).await?;
+    let res = post_optional(&url, req.model, body, |body| {
+        let mut betas = vec![COMPACTION_BETA];
+        if body.get("speed").is_some() { betas.push("fast-mode-2026-02-01"); }
+        let payload = bytes::Bytes::from(serde_json::to_string(body)?);
+        Ok(anthropic_request(http, &url, api_key, proxy, &betas).body(payload))
+    }).await?;
     let v: Value = res.json().await?;
     if v["stop_reason"] != "compaction" {
         bail!("no summary came back (stop reason: {})", v["stop_reason"].as_str().unwrap_or("?"));
@@ -476,23 +565,23 @@ async fn openai(
         "stream": true,
         "stream_options": { "include_usage": true },
     });
-    // Reasoning models (OpenAI's gpt-5+/o-series, also via proxies) take an effort level.
-    if req.model.starts_with("gpt-5") || req.model.starts_with("gpt-6") || req.model.starts_with('o') {
-        body["reasoning_effort"] = json!(match req.effort {
-            "low" => "low",
-            "medium" => "medium",
-            _ => "high",
-        });
+    if let Some(effort) = req.opts.effort {
+        body["reasoning_effort"] = json!(effort);
+    }
+    if let Some(Fast::ServiceTier { tier, .. }) = req.opts.fast {
+        body["service_tier"] = json!(tier);
+    }
+    if let Some(limit) = req.opts.max_output.filter(|n| *n > 0) {
+        body["max_tokens"] = json!(limit);
     }
     let url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
-    let res = post_with_retry(|| {
-        let b = http.post(&url).json(&body);
-        match api_key {
+    let res = post_optional(&url, req.model, body, |body| {
+        let b = http.post(&url).json(body);
+        Ok(match api_key {
             Some(k) => b.bearer_auth(k),
             None => b,
-        }
-    })
-    .await?;
+        })
+    }).await?;
 
     let mut text = String::new();
     // index → (id, name, arguments)
@@ -511,7 +600,12 @@ async fn openai(
                 bail!("{}", err["message"].as_str().unwrap_or("model error"));
             }
             if let Some(u) = ev.get("usage").filter(|u| u.is_object()) {
-                usage = json!({ "input_tokens": u["prompt_tokens"], "output_tokens": u["completion_tokens"] });
+                let cached = u["prompt_tokens_details"]["cached_tokens"].as_u64().unwrap_or(0);
+                usage = json!({
+                    "input_tokens": u["prompt_tokens"].as_u64().map(|tokens| tokens.saturating_sub(cached)),
+                    "output_tokens": u["completion_tokens"],
+                    "cache_read_input_tokens": cached,
+                });
             }
             let Some(choice) = ev["choices"].get(0) else { continue };
             let d = &choice["delta"];
@@ -573,22 +667,14 @@ async fn openai(
     Ok(Response { content, stop_reason: stop_reason.into(), usage, invalid_inputs: invalid })
 }
 
-pub fn context_window(model: &str) -> u64 {
-    if model.starts_with("claude-haiku") {
-        200_000
-    } else if model.starts_with("claude-") {
-        1_000_000
-    } else {
-        128_000
-    }
-}
 
 pub fn no_key(provider: &str) -> anyhow::Error {
     anyhow!("no API key for {provider}; run `sci-pi auth set {provider}` on this host (or set the env var)")
 }
 
-/// Model ids an OpenAI-style `/models` endpoint offers.
-pub async fn list_models(http: &reqwest::Client, models_url: &str, api_key: Option<&str>) -> Result<Vec<String>> {
+/// Model ids an OpenAI-style `/models` endpoint offers, with their context window when the
+/// endpoint says (OpenRouter `context_length`, Anthropic `max_input_tokens`, vLLM `max_model_len`, …).
+pub async fn list_models(http: &reqwest::Client, models_url: &str, api_key: Option<&str>) -> Result<Vec<(String, ModelInfo)>> {
     let mut b = http.get(models_url).timeout(Duration::from_secs(8));
     if let Some(k) = api_key {
         b = b.bearer_auth(k);
@@ -598,7 +684,91 @@ pub async fn list_models(http: &reqwest::Client, models_url: &str, api_key: Opti
         bail!("{models_url}: HTTP {}", res.status());
     }
     let v: Value = res.json().await?;
-    let mut ids: Vec<String> = v["data"].as_array().into_iter().flatten().filter_map(|m| m["id"].as_str().map(str::to_string)).collect();
-    ids.sort();
-    Ok(ids)
+    Ok(models::parse_openai_models(&v))
 }
+
+
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    
+
+    #[tokio::test]
+    async fn rejected_optional_fields_are_remembered_per_endpoint_and_model() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        for field in ["fallbacks", "service_tier"] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}", listener.local_addr().unwrap());
+            let server = tokio::spawn(async move {
+                let mut bodies = vec![];
+                for attempt in 0..3 {
+                    let (mut socket, _) = listener.accept().await.unwrap();
+                    let mut bytes = Vec::new();
+                    let body_start;
+                    let length;
+                    loop {
+                        let mut chunk = [0; 4096];
+                        let n = socket.read(&mut chunk).await.unwrap();
+                        assert!(n > 0);
+                        bytes.extend_from_slice(&chunk[..n]);
+                        if let Some(start) = bytes.windows(4).position(|window| window == b"\r\n\r\n") {
+                            body_start = start + 4;
+                            let headers = String::from_utf8_lossy(&bytes[..start]).to_ascii_lowercase();
+                            length = headers.lines().find_map(|line| line.strip_prefix("content-length:"))
+                                .unwrap().trim().parse::<usize>().unwrap();
+                            break;
+                        }
+                    }
+                    while bytes.len() < body_start + length {
+                        let mut chunk = [0; 4096];
+                        let n = socket.read(&mut chunk).await.unwrap();
+                        assert!(n > 0);
+                        bytes.extend_from_slice(&chunk[..n]);
+                    }
+                    bodies.push(serde_json::from_slice::<Value>(&bytes[body_start..body_start + length]).unwrap());
+                    let (status, response) = if attempt == 0 {
+                        ("400 Bad Request", json!({ "error": { "message": format!("Unknown field: {field}") } }).to_string())
+                    } else {
+                        ("200 OK", "{}".to_string())
+                    };
+                    let response = format!("HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}", response.len());
+                    socket.write_all(response.as_bytes()).await.unwrap();
+                }
+                bodies
+            });
+            let http = reqwest::Client::new();
+            let mut body = json!({ "model": "runtime-model" });
+            body[field] = json!("default");
+            for _ in 0..2 {
+                post_optional(&url, "runtime-model", body.clone(), |body| Ok(http.post(&url).json(body))).await.unwrap();
+            }
+            let bodies = server.await.unwrap();
+            assert!(bodies[0].get(field).is_some());
+            assert!(bodies[1].get(field).is_none());
+            assert!(bodies[2].get(field).is_none());
+        }
+        assert_eq!(rejected_optional("HTTP 400: invalid speed value"), None);
+        assert_eq!(rejected_optional("HTTP 401: unsupported service_tier"), None);
+        assert_eq!(rejected_optional("HTTP 400: unsupported model"), None);
+    }
+    #[test]
+    fn options_follow_metadata_without_model_name_rules() {
+        let info = ModelInfo {
+            efforts: vec![("custom".into(), None), ("other".into(), None)],
+            default_effort: Some("other".into()),
+            adaptive_thinking: Some(false),
+            ..Default::default()
+        };
+        let opts = Opts::from_info(&info, "unknown", true);
+        assert_eq!(opts.effort, Some("other"));
+        assert!(!opts.thinking);
+        assert!(opts.fast.is_none());
+        assert!(opts.max_output.is_none());
+        assert_eq!(Opts::from_info(&ModelInfo::default(), "high", false).effort, None);
+    }
+}
+
+

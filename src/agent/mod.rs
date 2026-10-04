@@ -7,18 +7,21 @@
 //! resumes with its full history after the process restarts.
 
 pub mod llm;
+pub mod models;
 pub mod prompt;
 pub mod tools;
 
 use crate::config::{self, Config, NativeConfig, ProviderKind};
 use anyhow::{anyhow, bail, Context, Result};
-use llm::{Delta, Provider, Request};
+use llm::{Delta, Opts, Provider, Request};
+use models::ModelInfo;
+use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
@@ -37,6 +40,8 @@ struct Settings {
     cwd: PathBuf,
     model: String,
     effort: String,
+    #[serde(default)]
+    fast: bool,
     mode: String,
     /// Tool kinds ("edit", "execute") the user allowed for the rest of the session.
     #[serde(default)]
@@ -62,14 +67,21 @@ struct Server {
     next_id: AtomicU64,
     sessions: Mutex<HashMap<String, Arc<Session>>>,
     native: NativeConfig,
-    /// provider → (fetched at, model ids) for providers that list their own models.
-    discovered: Mutex<HashMap<String, (std::time::Instant, Vec<String>)>>,
+    /// Provider discovery timestamps and runtime metadata by selectable model ID.
+    discovered: Mutex<HashMap<String, std::time::Instant>>,
+    registry: Mutex<HashMap<String, ModelInfo>>,
+    learned: Mutex<HashMap<String, u64>>,
+    /// models.dev fallback, indexed by bare model ID.
+    catalog: Mutex<HashMap<String, ModelInfo>>,
+    discovery: tokio::sync::Mutex<()>,
     dir: PathBuf,
     http: reqwest::Client,
 }
 
 pub async fn serve_stdio() -> Result<()> {
     let cfg = Config::load_or_init()?;
+    anyhow::ensure!(cfg.native.compact_ratio.is_finite() && cfg.native.compact_ratio > 0.0
+        && cfg.native.compact_ratio < 1.0, "native.compact_ratio must be between 0 and 1");
     let dir = config::data_dir().join("agent");
     std::fs::create_dir_all(&dir)?;
     let (out, mut out_rx) = mpsc::unbounded_channel::<String>();
@@ -89,8 +101,29 @@ pub async fn serve_stdio() -> Result<()> {
         sessions: Mutex::default(),
         native: cfg.native,
         discovered: Mutex::default(),
+        registry: Mutex::default(),
+        learned: Mutex::new(models::load_learned(&dir.join("learned-windows.json"))),
+        catalog: Mutex::default(),
+        discovery: tokio::sync::Mutex::new(()),
         dir,
         http: reqwest::Client::builder().connect_timeout(std::time::Duration::from_secs(30)).build()?,
+    });
+
+    let s = server.clone();
+    tokio::spawn(async move {
+        let catalog = models::models_dev(&s.http, &s.dir.join("models.json")).await;
+        *s.catalog.lock() = catalog;
+        s.discover_models().await;
+        let sessions: Vec<_> = s.sessions.lock().values().cloned().collect();
+        for session in sessions {
+            {
+                let mut settings = session.settings.lock();
+                s.normalize_settings(&mut settings);
+            }
+            let _ = s.save_settings(&session);
+            s.update(&session.id, json!({ "sessionUpdate": "config_option_update",
+                "configOptions": s.config_options(&session.settings.lock()) }));
+        }
     });
 
     let mut lines = BufReader::new(tokio::io::stdin()).lines();
@@ -111,7 +144,7 @@ pub async fn serve_stdio() -> Result<()> {
             }
             (Some(method), None) => server.notification(&method, &params),
             (None, Some(id)) => {
-                if let Some(tx) = id.as_u64().and_then(|id| server.pending.lock().unwrap().remove(&id)) {
+                if let Some(tx) = id.as_u64().and_then(|id| server.pending.lock().remove(&id)) {
                     let _ = tx.send(msg.get("result").cloned().unwrap_or(Value::Null));
                 }
             }
@@ -133,7 +166,7 @@ impl Server {
     async fn request(&self, method: &str, params: Value) -> Result<Value> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
-        self.pending.lock().unwrap().insert(id, tx);
+        self.pending.lock().insert(id, tx);
         self.send(json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }));
         rx.await.map_err(|_| anyhow!("client went away"))
     }
@@ -141,7 +174,7 @@ impl Server {
     fn notification(&self, method: &str, params: &Value) {
         if method == "session/cancel" {
             if let Some(s) = params["sessionId"].as_str().and_then(|id| self.session(id).ok()) {
-                if let Some(t) = s.cancel.lock().unwrap().as_ref() {
+                if let Some(t) = s.cancel.lock().as_ref() {
                     t.cancel();
                 }
             }
@@ -162,15 +195,18 @@ impl Server {
             })),
             "session/new" => {
                 let cwd = PathBuf::from(p["cwd"].as_str().ok_or_else(|| anyhow!("cwd is required"))?);
-                let settings = Settings {
+                self.discover_models().await;
+                let mut settings = Settings {
                     cwd,
                     model: self.native.model.clone(),
                     effort: self.native.effort.clone(),
+                    fast: false,
                     mode: "default".into(),
                     always_allow: vec![],
                     cost_usd: 0.0,
                     context_tokens: 0,
                 };
+                self.normalize_settings(&mut settings);
                 let session = Arc::new(Session {
                     id: uuid::Uuid::new_v4().to_string(),
                     settings: Mutex::new(settings),
@@ -179,16 +215,20 @@ impl Server {
                 });
                 self.save_settings(&session)?;
                 self.save_history(&session.id, &[])?;
-                self.discover_models().await;
-                self.sessions.lock().unwrap().insert(session.id.clone(), session.clone());
+                self.sessions.lock().insert(session.id.clone(), session.clone());
                 self.advertise_commands(&session.id);
                 Ok(self.session_info(&session, true))
             }
             "session/resume" | "session/load" => {
                 let id = p["sessionId"].as_str().ok_or_else(|| anyhow!("sessionId is required"))?;
                 let session = self.load(id)?;
-                self.sessions.lock().unwrap().insert(id.to_string(), session.clone());
+                self.sessions.lock().insert(id.to_string(), session.clone());
                 self.discover_models().await;
+                {
+                    let mut settings = session.settings.lock();
+                    self.normalize_settings(&mut settings);
+                }
+                self.save_settings(&session)?;
                 self.advertise_commands(id);
                 Ok(self.session_info(&session, false))
             }
@@ -200,7 +240,7 @@ impl Server {
             "session/set_config_option" => {
                 let s = self.session(p["sessionId"].as_str().unwrap_or_default())?;
                 self.set_option(&s, p["configId"].as_str().unwrap_or_default(), &p["value"])?;
-                Ok(json!({ "configOptions": self.config_options(&s.settings.lock().unwrap()) }))
+                Ok(json!({ "configOptions": self.config_options(&s.settings.lock()) }))
             }
             "session/prompt" => {
                 let s = self.session(p["sessionId"].as_str().unwrap_or_default())?;
@@ -218,11 +258,11 @@ impl Server {
     }
 
     fn session(&self, id: &str) -> Result<Arc<Session>> {
-        self.sessions.lock().unwrap().get(id).cloned().ok_or_else(|| anyhow!("unknown session {id}"))
+        self.sessions.lock().get(id).cloned().ok_or_else(|| anyhow!("unknown session {id}"))
     }
 
     fn session_info(&self, s: &Session, with_id: bool) -> Value {
-        let settings = s.settings.lock().unwrap();
+        let settings = s.settings.lock();
         let mut v = json!({
             "modes": {
                 "currentModeId": settings.mode,
@@ -237,73 +277,192 @@ impl Server {
     }
 
     fn config_options(&self, s: &Settings) -> Value {
-        let mut models: Vec<Value> =
-            llm::ANTHROPIC_MODELS.iter().map(|(id, name)| json!({ "value": id, "name": name })).collect();
-        let discovered = self.discovered.lock().unwrap();
-        for (provider, p) in &self.native.providers {
-            let listed = if p.models.is_empty() { discovered.get(provider).map(|d| d.1.clone()).unwrap_or_default() } else { p.models.clone() };
-            for m in &listed {
-                models.push(json!({ "value": format!("{provider}/{m}"), "name": format!("{m} ({provider})") }));
-            }
+        let mut ids: Vec<_> = self.registry.lock().keys().cloned().collect();
+        ids.sort();
+        let choices: Vec<_> = ids.iter().map(|id| models::option(id, &self.info(id), id)).collect();
+        let info = self.info(&s.model);
+        let mut options = vec![
+            json!({ "id": "mode", "name": "Mode", "category": "mode", "type": "select", "currentValue": s.mode,
+                "options": MODES.iter().map(|(id, name, d)| json!({ "value": id, "name": name, "description": d })).collect::<Vec<_>>() }),
+            json!({ "id": "model", "name": "Model", "category": "model", "type": "select",
+                "currentValue": s.model, "options": choices }),
+        ];
+        if !info.efforts.is_empty() {
+            options.push(json!({ "id": "effort", "name": "Effort", "category": "thought_level",
+                "type": "select", "currentValue": s.effort,
+                "options": info.efforts.iter().map(|(value, description)| json!({
+                    "value": value, "name": value, "description": description
+                })).collect::<Vec<_>>() }));
         }
-        if !models.iter().any(|m| m["value"] == s.model.as_str()) {
-            models.push(json!({ "value": s.model, "name": s.model }));
+        if let Some(fast) = &info.fast {
+            let description = match fast {
+                models::Fast::AnthropicSpeed => None,
+                models::Fast::ServiceTier { description, .. } => description.as_deref(),
+            };
+            options.push(json!({ "id": "fast", "name": "Fast", "type": "boolean",
+                "currentValue": s.fast, "description": description }));
         }
-        json!([
-            { "id": "mode", "name": "Mode", "category": "mode", "type": "select", "currentValue": s.mode,
-              "options": MODES.iter().map(|(id, name, d)| json!({ "value": id, "name": name, "description": d })).collect::<Vec<_>>() },
-            { "id": "model", "name": "Model", "category": "model", "type": "select", "currentValue": s.model, "options": models },
-            { "id": "effort", "name": "Effort", "category": "thought_level", "type": "select", "currentValue": s.effort,
-              "options": llm::EFFORTS.iter().map(|e| json!({ "value": e, "name": e })).collect::<Vec<_>>() },
-        ])
+        json!(options)
     }
 
-    /// Fills in model lists for providers configured without one (cached for 5 minutes).
+    /// Discover metadata even for a configured model allowlist; cache successful fetches.
     async fn discover_models(&self) {
-        for (name, p) in &self.native.providers {
-            if !p.models.is_empty() {
-                continue;
-            }
-            let fresh = self.discovered.lock().unwrap().get(name).is_some_and(|(at, _)| at.elapsed().as_secs() < 300);
+        let _discovery = self.discovery.lock().await;
+        for (name, provider) in &self.native.providers {
+            let fresh = self.discovered.lock().get(name).is_some_and(|at| at.elapsed().as_secs() < 300);
             if fresh {
                 continue;
             }
-            let base = p.base_url.trim_end_matches('/');
-            let url = match p.kind {
-                ProviderKind::Cliproxy => format!("{base}/v1/models"),
-                _ => format!("{base}/models"),
+            let key = config::credential(name, provider.api_key_env.as_deref());
+            let base = provider.base_url.trim_end_matches('/');
+            let result = match provider.kind {
+                ProviderKind::Cliproxy => models::cliproxy_models(&self.http, base, key.as_deref()).await,
+                ProviderKind::Anthropic => match key.as_deref() {
+                    Some(key) => models::anthropic_models(&self.http, base, key, true).await,
+                    None => Err(llm::no_key(name)),
+                },
+                ProviderKind::Openai => llm::list_models(&self.http, &format!("{base}/models"), key.as_deref()).await,
             };
-            let key = config::credential(name, p.api_key_env.as_deref());
-            match llm::list_models(&self.http, &url, key.as_deref()).await {
-                Ok(ids) => {
-                    self.discovered.lock().unwrap().insert(name.clone(), (std::time::Instant::now(), ids));
+            match result {
+                Ok(entries) => {
+                    let mut registry = self.registry.lock();
+                    let prefix = format!("{name}/");
+                    registry.retain(|id, _| !id.starts_with(&prefix));
+                    for (id, info) in entries {
+                        if provider.models.is_empty() || provider.models.contains(&id) {
+                            registry.insert(format!("{name}/{id}"), info);
+                        }
+                    }
+                    for id in &provider.models {
+                        registry.entry(format!("{name}/{id}")).or_default();
+                    }
+                    self.discovered.lock().insert(name.clone(), std::time::Instant::now());
                 }
-                Err(e) => eprintln!("model discovery for {name} failed: {e:#}"),
+                Err(error) => {
+                    eprintln!("model discovery for {name} failed: {error:#}");
+                    let mut registry = self.registry.lock();
+                    for id in &provider.models {
+                        registry.entry(format!("{name}/{id}")).or_default();
+                    }
+                }
+            }
+        }
+        // Direct Anthropic models are fetched only with a configured API credential.
+        if let Some(key) = config::credential("anthropic", None) {
+            let fresh = self.discovered.lock().get("").is_some_and(|at| at.elapsed().as_secs() < 300);
+            if !fresh {
+                let base = std::env::var("ANTHROPIC_BASE_URL").unwrap_or_else(|_| "https://api.anthropic.com".into());
+                match models::anthropic_models(&self.http, &base, &key, false).await {
+                    Ok(entries) => {
+                        let mut registry = self.registry.lock();
+                        for (id, mut info) in entries {
+                            info.provider = Some("anthropic".into());
+                            registry.insert(id, info);
+                        }
+                        self.discovered.lock().insert(String::new(), std::time::Instant::now());
+                    }
+                    Err(error) => eprintln!("Anthropic model discovery failed: {error:#}"),
+                }
+            }
+        } 
+        if !self.native.model.is_empty() {
+            let mut registry = self.registry.lock();
+            let builtin = self.native.model.strip_prefix("anthropic/")
+                .filter(|_| !self.native.providers.contains_key("anthropic"));
+            if let Some(info) = builtin.and_then(|bare| registry.get(bare)).cloned() {
+                registry.insert(self.native.model.clone(), info);
+            } else {
+                registry.entry(self.native.model.clone()).or_default();
             }
         }
     }
 
-    fn set_option(&self, s: &Session, id: &str, value: &Value) -> Result<()> {
-        let v = value.as_str().ok_or_else(|| anyhow!("value must be a string"))?.to_string();
+    fn pay_per_token(&self, model: &str) -> bool {
+        let (provider, _) = model.split_once('/').unwrap_or(("anthropic", model));
+        if let Some(config) = self.native.providers.get(provider) {
+            config.pay_per_token.unwrap_or(config.kind != ProviderKind::Cliproxy)
+        } else {
+            config::credential("anthropic", None).is_some()
+        }
+    }
+
+    fn info(&self, model: &str) -> ModelInfo {
+        let (_, bare) = model.split_once('/').unwrap_or(("", model));
+        let mut info = {
+            let registry = self.registry.lock();
+            registry.get(model).or_else(|| registry.get(bare)).cloned().unwrap_or_default()
+        };
+        if let Some(fallback) = self.catalog.lock().get(bare) {
+            info.fill_from(fallback);
+        }
+        if let Some(window) = self.native.context_windows.get(model).copied().filter(|w| *w > 0) {
+            info.window = Some(window);
+        }
+        if let Some(limit) = self.learned.lock().get(model).copied() {
+            info.window = Some(info.window.map_or(limit, |window| window.min(limit)));
+        }
+        if !self.pay_per_token(model) {
+            info.cost = None;
+        }
+        info
+    }
+
+    fn window(&self, model: &str) -> Option<u64> {
+        self.info(model).window
+    }
+
+    fn normalize_settings(&self, settings: &mut Settings) {
+        if settings.model.is_empty() {
+            settings.model = self.registry.lock().keys().min().cloned().unwrap_or_default();
+        }
+        let info = self.info(&settings.model);
+        let opts = Opts::from_info(&info, &settings.effort, settings.fast);
+        settings.effort = opts.effort.unwrap_or_default().to_owned();
+        if info.fast.is_none() {
+            settings.fast = false;
+        }
+    }
+
+    fn set_option(&self, session: &Session, id: &str, value: &Value) -> Result<()> {
         {
-            let mut st = s.settings.lock().unwrap();
+            let mut settings = session.settings.lock();
             match id {
-                "mode" if MODES.iter().any(|m| m.0 == v) => st.mode = v.clone(),
-                "model" => st.model = v.clone(),
-                "effort" if llm::EFFORTS.contains(&v.as_str()) => st.effort = v.clone(),
-                _ => bail!("unsupported option {id}={v}"),
+                "mode" => {
+                    let mode = value.as_str().context("mode must be a string")?;
+                    anyhow::ensure!(MODES.iter().any(|m| m.0 == mode), "unsupported mode {mode}");
+                    settings.mode = mode.to_owned();
+                }
+                "model" => {
+                    let model = value.as_str().context("model must be a string")?;
+                    anyhow::ensure!(self.registry.lock().contains_key(model), "unknown model {model}");
+                    settings.model = model.to_owned();
+                    settings.effort.clear();
+                    settings.fast = false;
+                    self.normalize_settings(&mut settings);
+                }
+                "effort" => {
+                    let effort = value.as_str().context("effort must be a string")?;
+                    anyhow::ensure!(self.info(&settings.model).efforts.iter().any(|e| e.0 == effort),
+                        "unsupported effort {effort} for {}", settings.model);
+                    settings.effort = effort.to_owned();
+                }
+                "fast" => {
+                    anyhow::ensure!(self.info(&settings.model).fast.is_some(), "Fast is unavailable for {}", settings.model);
+                    settings.fast = value.as_bool().context("fast must be a boolean")?;
+                }
+                _ => bail!("unsupported option {id}"),
             }
         }
         if id == "mode" {
-            self.update(&s.id, json!({ "sessionUpdate": "current_mode_update", "currentModeId": v }));
+            self.update(&session.id, json!({ "sessionUpdate": "current_mode_update", "currentModeId": value }));
         }
-        self.save_settings(s)
+        self.save_settings(session)
     }
 
     // ── persistence ───────────────────────────────────────────────────────────
 
     fn save_settings(&self, s: &Session) -> Result<()> {
-        let json = serde_json::to_vec(&*s.settings.lock().unwrap())?;
+        let json = serde_json::to_vec(&*s.settings.lock())?;
         atomic_write(&self.dir.join(format!("{}.settings.json", s.id)), &json)
     }
 
@@ -327,7 +486,12 @@ impl Server {
 
     // ── the loop ──────────────────────────────────────────────────────────────
 
-    fn provider(&self, model: &str) -> Result<(Provider, String)> {
+    async fn provider(&self, model: &str) -> Result<(Provider, String)> {
+        let model = if !self.native.providers.contains_key("anthropic") {
+            model.strip_prefix("anthropic/").unwrap_or(model)
+        } else {
+            model
+        };
         if let Some((name, m)) = model.split_once('/') {
             let p = self.native.providers.get(name).ok_or_else(|| anyhow!("unknown provider `{name}` in model `{model}`"))?;
             let api_key = config::credential(name, p.api_key_env.as_deref());
@@ -344,7 +508,7 @@ impl Server {
             };
             return Ok((provider, m.to_string()));
         }
-        if model.starts_with("claude-") {
+        if self.info(model).provider.as_deref() == Some("anthropic") {
             let api_key = config::credential("anthropic", None).ok_or_else(|| llm::no_key("anthropic"))?;
             let base_url = std::env::var("ANTHROPIC_BASE_URL").unwrap_or_else(|_| "https://api.anthropic.com".into());
             return Ok((Provider::Anthropic { api_key, base_url, proxy: false }, model.to_string()));
@@ -354,17 +518,17 @@ impl Server {
 
     async fn run_turn(self: &Arc<Self>, s: &Arc<Session>, prompt: Vec<Value>) -> Result<&'static str> {
         let token = CancellationToken::new();
-        *s.cancel.lock().unwrap() = Some(token.clone());
+        *s.cancel.lock() = Some(token.clone());
         let mut history = s.history.lock().await;
-        let cwd = s.settings.lock().unwrap().cwd.clone();
+        let cwd = s.settings.lock().cwd.clone();
         let system = prompt::system(&cwd);
         let tool_defs = main_tools();
 
         close_dangling_tool_uses(&mut history);
         // `/compact` is ours: summarize now instead of starting a turn.
         if prompt_text(&prompt).trim() == "/compact" {
-            let model = s.settings.lock().unwrap().model.clone();
-            self.compact(s, &mut history, &system, &tool_defs, &model, &Sink::Main, false).await;
+            let model = s.settings.lock().model.clone();
+            let _ = self.compact(s, &mut history, &system, &tool_defs, &model, &Sink::Main, false).await;
             return self.finish(s, &history, "end_turn");
         }
         let blocks = prompt_blocks(&prompt, &cwd);
@@ -381,7 +545,7 @@ impl Server {
     }
 
     fn finish(&self, s: &Session, history: &[Value], stop: &'static str) -> Result<&'static str> {
-        *s.cancel.lock().unwrap() = None;
+        *s.cancel.lock() = None;
         self.save_history(&s.id, history)?;
         Ok(stop)
     }
@@ -397,14 +561,20 @@ impl Server {
         sink: &Sink,
         token: &CancellationToken,
     ) -> Result<&'static str> {
-        let mut context: u64 = 0;
+        let mut context = if matches!(sink, Sink::Main) { s.settings.lock().context_tokens } else { 0 };
         for _ in 0..MAX_STEPS {
-            let settings = s.settings.lock().unwrap().clone();
+            let settings = s.settings.lock().clone();
             let model = sink.model().unwrap_or(&settings.model).to_string();
-            if context > self.compact_threshold(&model) {
-                self.compact(s, history, system, tool_defs, &model, sink, true).await;
+            if self.compact_threshold(&model).is_some_and(|threshold| context > threshold) {
+                let _ = self.compact(s, history, system, tool_defs, &model, sink, true).await;
             }
-            let (provider, api_model) = self.provider(&model)?;
+            if token.is_cancelled() {
+                return Ok("cancelled");
+            }
+            let (provider, api_model) = self.provider(&model).await?;
+            if token.is_cancelled() {
+                return Ok("cancelled");
+            }
             let message_id = uuid::Uuid::new_v4().to_string();
             let (sid, this, main) = (s.id.clone(), self.clone(), matches!(sink, Sink::Main));
             let mut on = move |d: Delta| {
@@ -420,11 +590,14 @@ impl Server {
                     })),
                 }
             };
-            let req = Request { model: &api_model, system, messages: history, tools: tool_defs, effort: &settings.effort };
+            let info = self.info(&model);
+            let opts = Opts::from_info(&info, &settings.effort, settings.fast);
+            let req = Request { model: &api_model, system, messages: history, tools: tool_defs, opts: &opts };
             let resp = tokio::select! {
-                r = provider.stream(&self.http, &req, &mut on) => r?,
+                r = provider.stream(&self.http, &req, &mut on) => r,
                 _ = token.cancelled() => return Ok("cancelled"),
             };
+            let resp = resp?;
             context = self.report_usage(s, &model, &resp.usage, sink);
             if !resp.content.is_empty() {
                 history.push(json!({ "role": "assistant", "content": resp.content }));
@@ -464,11 +637,10 @@ impl Server {
         }
     }
 
-    /// Tokens of context at which to compact: 80% of the window, capped so long sessions stay
-    /// fast and sharp (quality degrades as context grows), or `native.compact_at_tokens`.
-    fn compact_threshold(&self, model: &str) -> u64 {
-        let window = llm::context_window(model);
-        self.native.compact_at_tokens.unwrap_or(300_000).min(window * 8 / 10)
+    /// An explicit token threshold, otherwise a fraction of the known runtime window.
+    fn compact_threshold(&self, model: &str) -> Option<u64> {
+        self.native.compact_at_tokens.or_else(|| self.window(model)
+            .map(|window| (window as f64 * self.native.compact_ratio) as u64))
     }
 
     /// Replaces the history with a summary. On failure the history is left as it was.
@@ -482,17 +654,19 @@ impl Server {
         model: &str,
         sink: &Sink,
         mid_turn: bool,
-    ) {
+    ) -> bool {
         let id = format!("compact-{}", uuid::Uuid::new_v4().simple());
         let title = match sink {
             Sink::Main => "Compacting the conversation".to_string(),
             Sink::Sub { label, .. } => format!("⤷ {label}: compacting"),
         };
         self.update(&s.id, json!({ "sessionUpdate": "tool_call", "toolCallId": id, "title": title, "kind": "think", "status": "in_progress", "rawInput": {}, "content": [] }));
-        let effort = s.settings.lock().unwrap().effort.clone();
+        let settings = s.settings.lock().clone();
+        let info = self.info(model);
+        let opts = Opts::from_info(&info, &settings.effort, settings.fast);
         let result = async {
-            let (provider, api_model) = self.provider(model)?;
-            let req = Request { model: &api_model, system, messages: history, tools: tool_defs, effort: &effort };
+            let (provider, api_model) = self.provider(model).await?;
+            let req = Request { model: &api_model, system, messages: history, tools: tool_defs, opts: &opts };
             provider.compact(&self.http, &req).await
         }
         .await;
@@ -509,10 +683,12 @@ impl Server {
                 let text = format!("Compacted {before} messages into a summary:\n\n{}", c.summary.trim());
                 self.update(&s.id, json!({ "sessionUpdate": "tool_call_update", "toolCallId": id, "status": "completed",
                     "content": [{ "type": "content", "content": { "type": "text", "text": text } }] }));
+                true
             }
             Err(e) => {
                 self.update(&s.id, json!({ "sessionUpdate": "tool_call_update", "toolCallId": id, "status": "failed",
                     "content": [{ "type": "content", "content": { "type": "text", "text": format!("Compaction failed: {e:#}") } }] }));
+                false
             }
         }
     }
@@ -524,18 +700,21 @@ impl Server {
         let (input, read, write, output) =
             (n("input_tokens"), n("cache_read_input_tokens"), n("cache_creation_input_tokens"), n("output_tokens"));
         let used = input + read + write + output;
-        let cost = llm_cost(model, input, read, write, output);
+        let cost = if self.pay_per_token(model) { models::cost(&self.info(model), usage) } else { None };
         let (total, context, main_model) = {
-            let mut st = s.settings.lock().unwrap();
-            st.cost_usd += cost;
+            let mut st = s.settings.lock();
+            st.cost_usd += cost.unwrap_or(0.0);
             if matches!(sink, Sink::Main) {
                 st.context_tokens = used;
             }
             (st.cost_usd, st.context_tokens, st.model.clone())
         };
         let _ = self.save_settings(s);
-        let mut update = json!({ "sessionUpdate": "usage_update", "used": context, "size": llm::context_window(&main_model) });
-        if total > 0.0 {
+        let mut update = json!({ "sessionUpdate": "usage_update", "used": context });
+        if let Some(window) = self.window(&main_model) {
+            update["size"] = json!(window);
+        }
+        if self.pay_per_token(&main_model) && total > 0.0 {
             update["cost"] = json!({ "amount": total, "currency": "USD" });
         }
         self.update(&s.id, update);
@@ -630,7 +809,7 @@ impl Server {
                 "acceptEdits" => kind == "execute",
                 _ => true,
             }
-            && !s.settings.lock().unwrap().always_allow.iter().any(|k| k == kind);
+            && !s.settings.lock().always_allow.iter().any(|k| k == kind);
 
         if ask {
             let always = if kind == "edit" { "Allow all edits this session" } else { "Allow all commands this session" };
@@ -650,7 +829,7 @@ impl Server {
             match answer["outcome"]["optionId"].as_str() {
                 Some("allow-once") => {}
                 Some("allow-always") => {
-                    s.settings.lock().unwrap().always_allow.push(kind.to_string());
+                    s.settings.lock().always_allow.push(kind.to_string());
                     let _ = self.save_settings(s);
                 }
                 Some(_) => {
@@ -775,6 +954,8 @@ fn concurrent(call: &Value) -> bool {
     tools::read_only(name)
 }
 
+
+
 fn prompt_text(prompt: &[Value]) -> String {
     prompt.iter().filter(|b| b["type"] == "text").filter_map(|b| b["text"].as_str()).collect()
 }
@@ -840,20 +1021,6 @@ fn prompt_blocks(prompt: &[Value], cwd: &Path) -> Vec<Value> {
     out
 }
 
-/// Anthropic list prices per million tokens: (input, output, cache read). Cache writes bill at
-/// 1.25× input (5-minute TTL).
-fn llm_cost(model: &str, input: u64, read: u64, write: u64, output: u64) -> f64 {
-    let (i, o, r) = match model {
-        m if m.starts_with("claude-fable") || m.starts_with("claude-mythos") => (10.0, 50.0, 0.25),
-        "claude-opus-5-5" => (4.0, 20.0, 0.20),
-        m if m.starts_with("claude-opus") => (5.0, 25.0, 0.50),
-        "claude-sonnet-5-5" | "claude-sonnet-5" => (2.0, 10.0, 0.20),
-        m if m.starts_with("claude-sonnet") => (3.0, 15.0, 0.30),
-        m if m.starts_with("claude-haiku") => (1.0, 5.0, 0.10),
-        _ => return 0.0,
-    };
-    (input as f64 * i + write as f64 * i * 1.25 + read as f64 * r + output as f64 * o) / 1_000_000.0
-}
 
 fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
     let tmp = path.with_extension("tmp");

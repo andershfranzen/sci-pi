@@ -46,17 +46,22 @@ pub struct TailscaleConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NativeConfig {
     /// `claude-*` for Anthropic, or `<provider>/<model>` for an entry in `providers`.
-    #[serde(default = "default_model")]
+    #[serde(default)]
     pub model: String,
-    #[serde(default = "default_effort")]
+    #[serde(default)]
     pub effort: String,
     /// Model for subagents (default: the session's model).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subagent_model: Option<String>,
-    /// Compact the conversation once a request's context passes this many tokens
-    /// (default 300k, never above 80% of the model's window).
+    /// Compact once the request's context passes this explicit token threshold.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compact_at_tokens: Option<u64>,
+    /// Otherwise compact at this fraction of the runtime context window.
+    #[serde(default = "default_compact_ratio")]
+    pub compact_ratio: f64,
+    /// Context window overrides, by model as selected (e.g. "cliproxy/gpt-6.1-sol" = 272000).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub context_windows: BTreeMap<String, u64>,
     /// OpenAI-compatible endpoints (OpenAI, OpenRouter, llama.cpp, vLLM, Ollama, …).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub providers: BTreeMap<String, ProviderConfig>,
@@ -86,26 +91,27 @@ pub struct ProviderConfig {
     /// Empty = discover from the endpoint's `/models`.
     #[serde(default)]
     pub models: Vec<String>,
+    /// Override billing classification; subscription endpoints do not incur per-token API cost.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pay_per_token: Option<bool>,
 }
 
 impl Default for NativeConfig {
     fn default() -> Self {
         NativeConfig {
-            model: default_model(),
-            effort: default_effort(),
+            model: String::new(),
+            effort: String::new(),
             subagent_model: None,
             compact_at_tokens: None,
+            compact_ratio: default_compact_ratio(),
+            context_windows: BTreeMap::new(),
             providers: BTreeMap::new(),
         }
     }
 }
 
-fn default_model() -> String {
-    "claude-opus-5-5".into()
-}
-
-fn default_effort() -> String {
-    "xhigh".into()
+fn default_compact_ratio() -> f64 {
+    0.8
 }
 
 /// The native agent: this binary in ACP mode.

@@ -26,6 +26,10 @@ keep working, and approvals and results wait for you.
   effort, prompt caching, refusal fallbacks), any OpenAI-compatible endpoint (OpenAI,
   OpenRouter, llama.cpp, vLLM, Ollama), and [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI)
   servers (models discovered automatically).
+- **Runtime model metadata:** provider catalogs supply model names, context/output limits,
+  effort choices and defaults, thinking, Fast mode, compaction support and prices.
+  CLIProxyAPI's own catalog takes precedence over models.dev; unsupported capabilities stay
+  unsupported, and unknown limits stay unknown.
 - **Line-addressed edits.** `read_file` tags each file version with a short hash and numbers its
   lines; `edit_lines` replaces line ranges against that tag. The model never re-types old code,
   stale edits are rejected, and every edit returns the renumbered region so edits chain without
@@ -36,9 +40,10 @@ keep working, and approvals and results wait for you.
 - **Subagents:** a `task` tool hands a self-contained job to a fresh context. Read-only
   "explore" subagents issued together run in parallel; "work" subagents can edit behind the
   same approvals. Only their reports enter the parent's context.
-- **Automatic compaction:** past a context budget (default 300k tokens) the conversation is
-  summarized – server-side on Anthropic models that support it, so caching and thinking stay
-  valid; by the model itself elsewhere. `/compact` does it on demand.
+- **Automatic compaction:** past `native.compact_at_tokens`, or a configurable fraction of
+  the known context window (default 80%), the conversation is summarized. Server compaction
+  is used only when reported by the provider; otherwise the model writes the summary.
+  Unknown windows have no automatic token threshold. `/compact` does it on demand.
 - **Modes:** ask, accept edits, plan (read-only), autonomous – approvals show the diff and can
   be answered from any device.
 - **Durable:** history is saved after every step; a restarted agent resumes the session and
@@ -75,10 +80,11 @@ sci-pi update             # push this build to every host (refuses while agents 
 
 ```toml
 [native]
-model = "claude-opus-5-5"        # or "<provider>/<model>"
-effort = "xhigh"
-subagent_model = "claude-sonnet-5-5"   # optional: cheaper subagents
-compact_at_tokens = 300000
+model = ""                    # first available model; or an explicit "<provider>/<model>"
+effort = ""                   # the selected model's reported default
+compact_ratio = 0.8            # when compact_at_tokens is unset and the window is known
+# compact_at_tokens = 300000   # optional explicit threshold
+# subagent_model = "..."       # optional model override; otherwise use the session's model
 
 [native.providers.cliproxy]      # a CLIProxyAPI server
 kind = "cliproxy"
@@ -87,6 +93,7 @@ base_url = "https://homelab.example.ts.net"
 [native.providers.local]         # any OpenAI-compatible server
 base_url = "http://gpu-box:8080/v1"
 models = ["qwen3.6-35b"]
+# pay_per_token = false        # set for subscription endpoints (automatic for CLIProxyAPI)
 
 [tailscale]
 allow = ["you@example.com"]
@@ -95,6 +102,17 @@ ntfy_url = "https://ntfy.sh/your-secret-topic"   # optional phone push
 ```
 
 Keys come from `<PROVIDER>_API_KEY` env vars or `sci-pi auth set <provider>`.
+
+The model picker includes provider descriptions and runtime context/output limits.
+Effort and Fast controls appear only when reported for the selected model; changing models
+selects that model's effort default and resets Fast. Explicit `native.context_windows`
+overrides are supported. Optional-field rejections are remembered
+per endpoint and model for the running agent. Anthropic requests require a known output
+limit; missing metadata produces an error rather than a guessed token cap.
+
+USD usage costs are computed only from reported rates on pay-per-token endpoints.
+CLIProxyAPI does not get API-price estimates; other subscriptions can set
+`pay_per_token = false`. Missing cache prices are not substituted with guessed rates.
 
 A note on subscriptions: ChatGPT plans can be used by third-party tools. Claude Pro/Max
 subscriptions may only be used through Anthropic's own Claude Code – run Claude Code as the
