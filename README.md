@@ -113,6 +113,10 @@ survives restarts in `data/agent/learned-windows.json`. Optional-field rejection
 per endpoint and model for the running agent. Anthropic requests require a known output
 limit; missing metadata produces an error rather than a guessed token cap.
 
+Direct Anthropic inference uses automatic prompt caching. Anthropic-compatible proxies
+own cache placement; sci-pi does not add top-level automatic caching on that route,
+which would consume an extra slot beyond the proxy's four explicit cache breakpoints.
+
 USD usage costs are computed only from reported rates on pay-per-token endpoints.
 CLIProxyAPI and Anthropic OAuth do not get API-price estimates; other subscriptions can set
 `pay_per_token = false`. Missing cache prices are not substituted with guessed rates.

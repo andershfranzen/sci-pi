@@ -388,8 +388,11 @@ async fn anthropic(
     let oauth = is_anthropic_oauth(api_key);
     let (mut body, _) = anthropic_body(req, proxy, oauth)?;
     body["stream"] = json!(true);
-    // Auto-placed on the last cacheable block.
-    body["cache_control"] = json!({ "type": "ephemeral" });
+    // Proxies own their cache breakpoints; automatic caching would consume a fifth slot
+    // when they already place four explicit breakpoints.
+    if !proxy {
+        body["cache_control"] = json!({ "type": "ephemeral" });
+    }
     let url = format!("{}/v1/messages", base_url.trim_end_matches('/'));
     let res = post_optional(&url, req.model, body, |body| {
         let mut betas = vec![];
@@ -906,6 +909,60 @@ mod tests {
         assert_eq!(rejected_optional("HTTP 401: unsupported service_tier"), None);
         assert_eq!(rejected_optional("HTTP 400: unsupported model"), None);
     }
+    #[tokio::test]
+    async fn proxy_cache_placement_stays_within_anthropic_limit() {
+        use axum::{http::StatusCode, response::IntoResponse, routing::post, Json, Router};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let app = Router::new().route("/v1/messages", post(|Json(mut body): Json<Value>| async move {
+            // Proxy-owned breakpoints: tools, system, first user, latest user.
+            for path in ["/tools/0", "/system/0", "/messages/0/content/0", "/messages/2/content/0"] {
+                body.pointer_mut(path).unwrap()["cache_control"] = json!({ "type": "ephemeral" });
+            }
+            let points = body["tools"].as_array().unwrap().iter()
+                .chain(body["system"].as_array().unwrap())
+                .chain(body["messages"].as_array().unwrap().iter()
+                    .flat_map(|m| m["content"].as_array().unwrap()))
+                .filter(|block| block.get("cache_control").is_some()).count()
+                + usize::from(body.get("cache_control").is_some());
+            if points > 4 {
+                return (StatusCode::BAD_REQUEST, Json(json!({ "error": { "message":
+                    format!("A maximum of 4 blocks with cache_control may be provided. Found {points}.")
+                } }))).into_response();
+            }
+            if body.get("compaction").is_some() {
+                return Json(json!({
+                    "stop_reason": "compaction",
+                    "content": [{ "type": "compaction", "content": "Conversation summarized." }],
+                    "usage": { "iterations": [] },
+                })).into_response();
+            }
+            let event = json!({ "type": "content_block_start", "index": 0,
+                "content_block": { "type": "text", "text": "Cache budget accepted." } });
+            ([("content-type", "text/event-stream")], format!("data: {event}\n\n")).into_response()
+        }));
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
+        let provider = Provider::Anthropic { api_key: "proxy-key".into(), base_url, proxy: true };
+        let info = ModelInfo { max_output: Some(1024), server_compaction: Some(true), ..Default::default() };
+        let opts = Opts::from_info(&info, "", false);
+        let messages = [
+            json!({ "role": "user", "content": [{ "type": "text", "text": "Earlier question." }] }),
+            json!({ "role": "assistant", "content": [{ "type": "text", "text": "Earlier answer." }] }),
+            json!({ "role": "user", "content": [{ "type": "text", "text": "Continue." }] }),
+        ];
+        let tools = [json!({ "name": "read_file", "description": "Read a file.",
+            "input_schema": { "type": "object", "properties": {} } })];
+        let req = Request { model: "runtime-model", system: "Agent instructions.",
+            messages: &messages, tools: &tools, opts: &opts, session_id: "cache-budget-test" };
+        let http = reqwest::Client::new();
+        let response = provider.stream(&http, &req, &mut |_| {}).await.unwrap();
+        let compacted = provider.compact(&http, &req).await.unwrap();
+        server.abort();
+        assert_eq!(response.content[0]["text"], "Cache budget accepted.");
+        assert_eq!(compacted.summary, "Conversation summarized.");
+    }
+
     #[test]
     fn options_follow_metadata_without_model_name_rules() {
         let info = ModelInfo {
