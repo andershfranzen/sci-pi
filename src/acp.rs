@@ -13,6 +13,15 @@ use tokio::sync::{mpsc, oneshot};
 
 pub const PROTOCOL_VERSION: u64 = 1;
 
+/// Process groups of every running agent, so the daemon can take them down when it exits.
+static AGENT_GROUPS: std::sync::LazyLock<Mutex<std::collections::HashSet<u32>>> = std::sync::LazyLock::new(Mutex::default);
+
+pub fn kill_all_agents() {
+    for pgid in AGENT_GROUPS.lock().unwrap().drain() {
+        let _ = std::process::Command::new("kill").args(["-TERM", &format!("-{pgid}")]).status();
+    }
+}
+
 /// This binary's path. After an upgrade replaces the file, Linux reports the running image as
 /// "<path> (deleted)"; the new binary at that path is the one to launch.
 fn self_exe() -> Result<String> {
@@ -58,6 +67,9 @@ impl Conn {
             .kill_on_drop(true)
             .spawn()
             .map_err(|e| anyhow!("failed to start `{program}`: {e}"))?;
+        if let Some(pid) = child.id() {
+            AGENT_GROUPS.lock().unwrap().insert(pid);
+        }
 
         let mut stdin = child.stdin.take().unwrap();
         let stdout = child.stdout.take().unwrap();
@@ -174,6 +186,7 @@ impl Conn {
     pub async fn kill(&self) {
         let mut child = self.child.lock().await;
         if let Some(pid) = child.id() {
+            AGENT_GROUPS.lock().unwrap().remove(&pid);
             let _ = std::process::Command::new("kill").args(["-TERM", &format!("-{pid}")]).status();
         }
         if tokio::time::timeout(std::time::Duration::from_secs(3), child.wait()).await.is_err() {

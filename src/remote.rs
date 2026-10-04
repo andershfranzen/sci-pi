@@ -203,6 +203,22 @@ pub async fn busy() -> Result<()> {
     std::process::exit(3);
 }
 
+/// Installs this binary as the local daemon: ~/.local/bin/sci-pi under a systemd user unit,
+/// same as `add` does on a remote host. Re-run after a build to upgrade and restart.
+pub async fn install_local() -> Result<()> {
+    let bin = dirs::home_dir().unwrap().join(".local/bin");
+    std::fs::create_dir_all(&bin)?;
+    std::fs::copy(std::env::current_exe()?, bin.join("sci-pi.new"))?;
+    // The script ends by printing the daemon's token for remote installs; keep it off the terminal.
+    let mut child = Command::new("bash").args(["-s", "--", ""]).stdin(Stdio::piped()).stdout(Stdio::null()).spawn()?;
+    child.stdin.take().unwrap().write_all(INSTALL.as_bytes()).await?;
+    if !child.wait().await?.success() {
+        bail!("install failed");
+    }
+    println!("✓ sci-pi daemon installed as a systemd user service (logs: journalctl --user -u sci-pi -f)");
+    Ok(())
+}
+
 pub fn tailscale_allow(login: &str) -> Result<()> {
     let mut cfg = Config::load_or_init()?;
     if !cfg.tailscale.allow.iter().any(|a| a.eq_ignore_ascii_case(login)) {

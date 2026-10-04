@@ -47,6 +47,11 @@ impl Hub {
         }
     }
 
+    /// Whether anything at all responds to HTTP at `base`.
+    async fn answers(&self, base: &str) -> bool {
+        self.http.get(format!("{base}/api/ping")).send().await.is_ok()
+    }
+
     async fn ping(&self, base: &str) -> Option<Value> {
         let res = self.http.get(format!("{base}/api/ping")).send().await.ok()?;
         let v: Value = res.json().await.ok()?;
@@ -221,8 +226,33 @@ async fn watch_local(hub: Hub) {
         .unwrap_or_else(|| format!("127.0.0.1:{DAEMON_PORT}"));
     let url = format!("http://{}", bind.replace("0.0.0.0", "127.0.0.1"));
     loop {
+        // Something answering that isn't a current daemon (e.g. one from before an upgrade)
+        // would otherwise just make this machine vanish from the UI.
+        if hub.ping(&url).await.is_none() && hub.answers(&url).await {
+            {
+                let mut hosts = hub.hosts.lock().unwrap();
+                hosts.retain(|_, h| h.transport != "local");
+                hosts.insert(
+                    "this machine".into(),
+                    HubHost {
+                        name: "this machine".into(),
+                        url: url.clone(),
+                        token: String::new(),
+                        transport: "local",
+                        discovered: false,
+                        status: "error",
+                        error: Some(format!(
+                            "an outdated daemon is answering on {url}; stop it and run `sci-pi service install` (or `sci-pi serve`)"
+                        )),
+                    },
+                );
+            }
+            tokio::time::sleep(Duration::from_secs(3)).await;
+            continue;
+        }
         match hub.ping(&url).await {
             Some(p) => {
+                hub.hosts.lock().unwrap().retain(|name, h| !(h.transport == "local" && name == "this machine"));
                 let name = p["host"].as_str().unwrap_or("local").to_string();
                 let token = config::token().unwrap_or_default();
                 let mut hosts = hub.hosts.lock().unwrap();

@@ -53,13 +53,33 @@ pub async fn serve() -> Result<()> {
     let state = AppState { mgr, token, tailnet: Arc::default() };
     let app = router(state.clone());
 
-    let listener = tokio::net::TcpListener::bind(&cfg.bind).await?;
+    let listener = match tokio::net::TcpListener::bind(&cfg.bind).await {
+        Ok(l) => l,
+        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => anyhow::bail!(
+            "{} is already in use – is another sci-pi daemon running? (`systemctl --user status sci-pi`)",
+            cfg.bind
+        ),
+        Err(e) => return Err(e.into()),
+    };
     tracing::info!("listening on http://{}", cfg.bind);
     if cfg.tailscale.enabled {
         tokio::spawn(tailnet_listeners(cfg.clone(), app.clone(), state.tailnet.clone()));
     }
-    axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await?;
+    axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
+        .with_graceful_shutdown(shutdown_signal())
+        .await?;
+    // Agents run in their own process groups, so they'd outlive us without this.
+    crate::acp::kill_all_agents();
     Ok(())
+}
+
+async fn shutdown_signal() {
+    let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).expect("SIGTERM handler");
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {}
+        _ = term.recv() => {}
+    }
+    tracing::info!("shutting down");
 }
 
 /// Waits for tailscaled (it may come up after us at boot), then listens on every tailnet IP,

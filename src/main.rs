@@ -50,6 +50,11 @@ enum Cmd {
         #[arg(long)]
         force: bool,
     },
+    /// Manage this machine's own daemon.
+    Service {
+        #[command(subcommand)]
+        cmd: ServiceCmd,
+    },
     /// List remembered hosts.
     Hosts,
     /// Print this machine's daemon token.
@@ -69,6 +74,12 @@ enum Cmd {
     Busy,
     #[command(hide = true)]
     TailscaleAllow { login: String },
+}
+
+#[derive(Subcommand)]
+enum ServiceCmd {
+    /// Install (or upgrade to) this binary as a systemd user service and (re)start it.
+    Install,
 }
 
 #[derive(Subcommand)]
@@ -93,6 +104,7 @@ async fn main() -> Result<()> {
         Cmd::Ui { port, no_open } => hub::run(port, !no_open).await,
         Cmd::Add { target, name, force } => remote::add(&target, name, force).await,
         Cmd::Update { force } => remote::update_all(force).await,
+        Cmd::Service { cmd: ServiceCmd::Install } => remote::install_local().await,
         Cmd::Busy => remote::busy().await,
         Cmd::Hosts => {
             for (name, h) in config::Hosts::load()?.hosts {
