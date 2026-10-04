@@ -244,8 +244,10 @@ async fn ping(State(st): State<AppState>) -> Json<Value> {
 }
 
 async fn info(State(st): State<AppState>, Extension(viewer): Extension<Viewer>) -> ApiResult {
-    let agents: Vec<Value> =
-        st.mgr.cfg.agents.iter().map(|(id, a)| json!({ "id": id, "name": a.name })).collect();
+    // outpost's own agent first, so it's the default pick in the UI.
+    let mut agents: Vec<(&String, &crate::config::AgentSpec)> = st.mgr.cfg.agents.iter().collect();
+    agents.sort_by_key(|(id, _)| id.as_str() != crate::config::NATIVE_AGENT);
+    let agents: Vec<Value> = agents.into_iter().map(|(id, a)| json!({ "id": id, "name": a.name })).collect();
     let tailnet_url = st.tailnet.read().unwrap().as_ref().map(|t| t.url.clone());
     Ok(Json(json!({
         "host": hostname(),

@@ -13,6 +13,13 @@ use tokio::sync::{mpsc, oneshot};
 
 pub const PROTOCOL_VERSION: u64 = 1;
 
+/// This binary's path. After an upgrade replaces the file, Linux reports the running image as
+/// "<path> (deleted)"; the new binary at that path is the one to launch.
+fn self_exe() -> Result<String> {
+    let exe = std::env::current_exe()?.to_string_lossy().into_owned();
+    Ok(exe.strip_suffix(" (deleted)").map(str::to_string).unwrap_or(exe))
+}
+
 /// Something the agent sent us that isn't a response to one of our requests.
 #[derive(Debug)]
 pub enum Incoming {
@@ -38,7 +45,9 @@ impl Conn {
         cwd: &Path,
     ) -> Result<(Arc<Conn>, mpsc::UnboundedReceiver<Incoming>)> {
         let (program, args) = command.split_first().ok_or_else(|| anyhow!("empty agent command"))?;
-        let mut child = Command::new(program)
+        // "@self" is this binary: the native agent runs as `outpost acp`.
+        let program = if program == "@self" { self_exe()? } else { program.clone() };
+        let mut child = Command::new(&program)
             .args(args)
             .envs(env)
             .current_dir(cwd)

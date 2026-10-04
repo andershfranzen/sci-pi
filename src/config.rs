@@ -23,6 +23,9 @@ pub struct Config {
     pub ntfy_url: Option<String>,
     #[serde(default)]
     pub tailscale: TailscaleConfig,
+    /// outpost's own agent.
+    #[serde(default)]
+    pub native: NativeConfig,
     #[serde(default = "default_agents")]
     pub agents: BTreeMap<String, AgentSpec>,
 }
@@ -38,6 +41,65 @@ pub struct TailscaleConfig {
     /// (tagged nodes have none, so `outpost add` fills this in).
     #[serde(default)]
     pub allow: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NativeConfig {
+    /// `claude-*` for Anthropic, or `<provider>/<model>` for an entry in `providers`.
+    #[serde(default = "default_model")]
+    pub model: String,
+    #[serde(default = "default_effort")]
+    pub effort: String,
+    /// OpenAI-compatible endpoints (OpenAI, OpenRouter, llama.cpp, vLLM, Ollama, …).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub providers: BTreeMap<String, ProviderConfig>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ProviderKind {
+    /// OpenAI-compatible chat completions; `base_url` ends in `/v1`.
+    #[default]
+    Openai,
+    /// Anthropic Messages API at `base_url` (`/v1/messages` is appended).
+    Anthropic,
+    /// A CLIProxyAPI server (root URL): `claude-*` over its Anthropic endpoint, everything else
+    /// over its OpenAI endpoint. Models are discovered from `/v1/models`.
+    Cliproxy,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProviderConfig {
+    #[serde(default)]
+    pub kind: ProviderKind,
+    pub base_url: String,
+    /// Env var holding the key; otherwise `outpost auth set <name>`. Local servers need none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key_env: Option<String>,
+    /// Empty = discover from the endpoint's `/models`.
+    #[serde(default)]
+    pub models: Vec<String>,
+}
+
+impl Default for NativeConfig {
+    fn default() -> Self {
+        NativeConfig { model: default_model(), effort: default_effort(), providers: BTreeMap::new() }
+    }
+}
+
+fn default_model() -> String {
+    "claude-opus-5-5".into()
+}
+
+fn default_effort() -> String {
+    "xhigh".into()
+}
+
+/// The native agent: this binary in ACP mode.
+pub const NATIVE_AGENT: &str = "outpost";
+
+fn native_agent() -> AgentSpec {
+    AgentSpec { name: "outpost".into(), command: vec!["@self".into(), "acp".into()], env: BTreeMap::new() }
 }
 
 impl Default for TailscaleConfig {
@@ -65,6 +127,7 @@ fn default_agents() -> BTreeMap<String, AgentSpec> {
         env: BTreeMap::new(),
     };
     BTreeMap::from([
+        (NATIVE_AGENT.into(), native_agent()),
         ("claude".into(), agent("Claude Code", &["npx", "-y", "@agentclientprotocol/claude-agent-acp"])),
         ("codex".into(), agent("Codex", &["npx", "-y", "@zed-industries/codex-acp"])),
         ("opencode".into(), agent("OpenCode", &["opencode", "acp"])),
@@ -74,7 +137,13 @@ fn default_agents() -> BTreeMap<String, AgentSpec> {
 
 impl Default for Config {
     fn default() -> Self {
-        Config { bind: default_bind(), ntfy_url: None, tailscale: TailscaleConfig::default(), agents: default_agents() }
+        Config {
+            bind: default_bind(),
+            ntfy_url: None,
+            tailscale: TailscaleConfig::default(),
+            native: NativeConfig::default(),
+            agents: default_agents(),
+        }
     }
 }
 
@@ -88,7 +157,10 @@ impl Config {
             return Ok(cfg);
         }
         let text = std::fs::read_to_string(&path)?;
-        toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))
+        let mut cfg: Config = toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
+        // The native agent is always available, even in configs written before it existed.
+        cfg.agents.entry(NATIVE_AGENT.into()).or_insert_with(native_agent);
+        Ok(cfg)
     }
 
     pub fn save(&self) -> Result<()> {
@@ -199,4 +271,30 @@ pub fn expand_tilde(path: &str) -> PathBuf {
         Some(rest) => dirs::home_dir().unwrap().join(rest.trim_start_matches('/')),
         None => PathBuf::from(path),
     }
+}
+
+/// Provider credentials stored on this host (`~/.config/outpost/credentials.toml`, 0600).
+fn credentials_path() -> PathBuf {
+    config_dir().join("credentials.toml")
+}
+
+fn load_credentials() -> BTreeMap<String, String> {
+    std::fs::read_to_string(credentials_path()).ok().and_then(|t| toml::from_str(&t).ok()).unwrap_or_default()
+}
+
+pub fn set_credential(provider: &str, secret: &str) -> Result<()> {
+    let mut creds = load_credentials();
+    creds.insert(provider.to_string(), secret.to_string());
+    write_private(&credentials_path(), &toml::to_string_pretty(&creds)?)
+}
+
+/// A provider's key: its env var first (e.g. ANTHROPIC_API_KEY), then the credentials file.
+pub fn credential(provider: &str, env_var: Option<&str>) -> Option<String> {
+    let default_env = format!("{}_API_KEY", provider.to_uppercase().replace('-', "_"));
+    let env = env_var.unwrap_or(&default_env);
+    std::env::var(env).ok().filter(|k| !k.is_empty()).or_else(|| load_credentials().remove(provider))
+}
+
+pub fn credential_providers() -> Vec<String> {
+    load_credentials().into_keys().collect()
 }

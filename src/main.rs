@@ -1,4 +1,5 @@
 mod acp;
+mod agent;
 mod config;
 mod git;
 mod hub;
@@ -55,12 +56,27 @@ enum Cmd {
     Token,
     /// Check agents, Tailscale and config on this machine.
     Doctor,
+    /// Run outpost's own agent as an ACP server on stdio (the daemon does this; so can editors).
+    Acp,
+    /// Manage model provider credentials on this host.
+    Auth {
+        #[command(subcommand)]
+        cmd: AuthCmd,
+    },
     #[command(hide = true)]
     LocalInfo,
     #[command(hide = true)]
     Busy,
     #[command(hide = true)]
     TailscaleAllow { login: String },
+}
+
+#[derive(Subcommand)]
+enum AuthCmd {
+    /// Store an API key (read from stdin), e.g. `outpost auth set anthropic`.
+    Set { provider: String },
+    /// Show which providers have credentials.
+    Status,
 }
 
 #[tokio::main]
@@ -90,6 +106,30 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Cmd::Doctor => doctor().await,
+        Cmd::Acp => agent::serve_stdio().await,
+        Cmd::Auth { cmd: AuthCmd::Set { provider } } => {
+            use std::io::IsTerminal;
+            if std::io::stdin().is_terminal() {
+                eprint!("{provider} API key: ");
+            }
+            let mut key = String::new();
+            std::io::stdin().read_line(&mut key)?;
+            let key = key.trim();
+            anyhow::ensure!(!key.is_empty(), "no key given");
+            config::set_credential(&provider, key)?;
+            println!("saved {provider} key to {}", config::config_dir().join("credentials.toml").display());
+            Ok(())
+        }
+        Cmd::Auth { cmd: AuthCmd::Status } => {
+            for p in ["anthropic", "openai"] {
+                let have = config::credential(p, None).is_some();
+                println!("{} {p}", if have { "✓" } else { "✗" });
+            }
+            for p in config::credential_providers().into_iter().filter(|p| p != "anthropic" && p != "openai") {
+                println!("✓ {p}");
+            }
+            Ok(())
+        }
         Cmd::LocalInfo => remote::local_info().await,
         Cmd::TailscaleAllow { login } => remote::tailscale_allow(&login),
     }
