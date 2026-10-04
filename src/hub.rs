@@ -61,23 +61,8 @@ pub async fn run(port: u16, open: bool) -> Result<()> {
         http: reqwest::Client::builder().timeout(Duration::from_secs(3)).build()?,
     };
 
-    // This machine, if it runs a daemon too.
-    let local_url = format!("http://127.0.0.1:{DAEMON_PORT}");
-    if let Some(p) = hub.ping(&local_url).await {
-        let name = p["host"].as_str().unwrap_or("local").to_string();
-        hub.hosts.lock().unwrap().insert(
-            name.clone(),
-            HubHost {
-                name,
-                url: local_url,
-                token: config::token()?,
-                transport: "local",
-                discovered: false,
-                status: "connected",
-                error: None,
-            },
-        );
-    }
+    // This machine's daemon may start after the hub (or restart), so keep watching for it.
+    tokio::spawn(watch_local(hub.clone()));
 
     for (name, h) in Hosts::load()?.hosts {
         // Prefer the tailnet: direct, no tunnel, survives the laptop changing networks.
@@ -223,6 +208,47 @@ async fn tunnel(hub: Hub, name: String, host: config::Host, reconnect: Arc<Notif
             _ = reconnect.notified() => {}
         }
         backoff = (backoff * 2).min(Duration::from_secs(30));
+    }
+}
+
+/// Tracks the daemon on this machine: listed while it answers, marked as down when it stops.
+async fn watch_local(hub: Hub) {
+    // Wherever this machine's daemon is configured to listen.
+    let bind = std::fs::read_to_string(config::config_dir().join("config.toml"))
+        .ok()
+        .and_then(|t| toml::from_str::<config::Config>(&t).ok())
+        .map(|c| c.bind)
+        .unwrap_or_else(|| format!("127.0.0.1:{DAEMON_PORT}"));
+    let url = format!("http://{}", bind.replace("0.0.0.0", "127.0.0.1"));
+    loop {
+        match hub.ping(&url).await {
+            Some(p) => {
+                let name = p["host"].as_str().unwrap_or("local").to_string();
+                let token = config::token().unwrap_or_default();
+                let mut hosts = hub.hosts.lock().unwrap();
+                let h = hosts.entry(name.clone()).or_insert_with(|| HubHost {
+                    name,
+                    url: url.clone(),
+                    token: String::new(),
+                    transport: "local",
+                    discovered: false,
+                    status: "connected",
+                    error: None,
+                });
+                if h.transport == "local" {
+                    h.token = token; // the daemon creates it on first start
+                    h.status = "connected";
+                    h.error = None;
+                }
+            }
+            None => {
+                for h in hub.hosts.lock().unwrap().values_mut().filter(|h| h.transport == "local") {
+                    h.status = "error";
+                    h.error = Some(format!("no daemon answering on {url}; start it with `outpost serve`"));
+                }
+            }
+        }
+        tokio::time::sleep(Duration::from_secs(3)).await;
     }
 }
 

@@ -19,6 +19,7 @@ use std::net::SocketAddr;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tower_http::cors::{Any, CorsLayer};
+use axum::http::Method;
 
 #[derive(rust_embed::RustEmbed)]
 #[folder = "web/dist"]
@@ -166,8 +167,17 @@ fn router(state: AppState) -> Router {
     Router::new()
         .nest("/api", api)
         .fallback(static_asset)
-        .layer(CorsLayer::new().allow_origin(Any).allow_headers(Any).allow_methods(Any))
+        .layer(cors())
         .with_state(state)
+}
+
+/// Browsers don't let `Access-Control-Allow-Headers: *` cover `Authorization`, so the headers
+/// must be listed explicitly or every authenticated cross-origin call (hub → daemon) fails.
+fn cors() -> CorsLayer {
+    CorsLayer::new()
+        .allow_origin(Any)
+        .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE])
+        .allow_methods([Method::GET, Method::POST, Method::PATCH, Method::DELETE])
 }
 
 async fn auth(
