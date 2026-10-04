@@ -98,6 +98,7 @@ interface Event {
 | `reverted`            | `{ turn, checkpoint }` – working tree restored to before `turn` |
 | `git`                 | `{ action: "commit", sha, message }` or `{ action: "push", output }` |
 | `pr_created`          | `{ url }` |
+| `forked`              | `{ from, from_title, turn }` – first event of a forked session |
 | `status`              | `{ status: SessionStatus, message?: string }` |
 | `error`               | `{ message: string }` |
 
@@ -135,6 +136,8 @@ ACP `update` objects the UI should render (others can be ignored):
 | `POST /api/sessions/:id/queue/:qid/send_now` | | `{}` – moves it to the front and interrupts the running turn |
 | `POST /api/sessions/:id/config` | `{ config_id, value }` | `{}` – model/effort/etc.; result arrives as a `session` message |
 | `POST /api/sessions/:id/revert` | `{ turn }` | `{}` – restore files to the checkpoint before `turn` (not while running). The agent is told on its next prompt. |
+| `POST /api/sessions/:id/fork` | `{ turn?, agent? }` | `Session` – new session continuing from the end of `turn` (default: latest): files from that turn's checkpoint in a fresh worktree, conversation handed over from the log, so it works across agents ("try this with Codex instead") |
+| `GET /api/search?q=` | | `{ session_id, session_title, event_id, role: "user"\|"agent", snippet }[]` – full-text, prefix matching; matches wrapped in `<<…>>` |
 | `GET /api/sessions/:id/files?q=` | | `string[]` – fuzzy file search for `@` mentions (paths relative to cwd, max 30) |
 | `GET /api/sessions/:id/git` | | `{ git, branch, dirty, remote, upstream, ahead, behind, commits_since_base, pr_url, gh }` |
 | `POST /api/sessions/:id/git/commit` | `{ message }` | `{ sha }` – `git add -A && git commit` |

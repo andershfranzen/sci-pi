@@ -142,6 +142,8 @@ fn router(state: AppState) -> Router {
         .route("/sessions/{id}/queue/{qid}", axum::routing::delete(queue_delete).patch(queue_edit))
         .route("/sessions/{id}/queue/{qid}/send_now", post(queue_send_now))
         .route("/sessions/{id}/revert", post(revert))
+        .route("/sessions/{id}/fork", post(fork))
+        .route("/search", get(search))
         .route("/sessions/{id}/files", get(files))
         .route("/sessions/{id}/git", get(git_status))
         .route("/sessions/{id}/git/commit", post(git_commit))
@@ -331,6 +333,36 @@ struct RevertReq {
 async fn revert(State(st): State<AppState>, Path(id): Path<String>, Json(req): Json<RevertReq>) -> ApiResult {
     st.mgr.revert(&id, req.turn).await?;
     Ok(Json(json!({})))
+}
+
+#[derive(Deserialize)]
+struct ForkReq {
+    turn: Option<u32>,
+    agent: Option<String>,
+}
+
+async fn fork(State(st): State<AppState>, Path(id): Path<String>, Json(req): Json<ForkReq>) -> ApiResult {
+    Ok(Json(serde_json::to_value(st.mgr.fork(&id, req.turn, req.agent).await?)?))
+}
+
+#[derive(Deserialize)]
+struct SearchQuery {
+    q: String,
+}
+
+async fn search(State(st): State<AppState>, Query(q): Query<SearchQuery>) -> ApiResult {
+    let hits: Vec<Value> = st
+        .mgr
+        .store
+        .search(&q.q, 50)?
+        .into_iter()
+        .filter_map(|mut h| {
+            let s = st.mgr.get(h["session_id"].as_str()?)?;
+            h["session_title"] = json!(s.title);
+            Some(h)
+        })
+        .collect();
+    Ok(Json(Value::Array(hits)))
 }
 
 #[derive(Deserialize)]

@@ -48,10 +48,18 @@ async fn ssh(target: &str, cmd: &str) -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
-pub async fn add(target: &str, name: Option<String>) -> Result<()> {
+pub async fn add(target: &str, name: Option<String>, force: bool) -> Result<()> {
     let name = name.unwrap_or_else(|| target.rsplit('@').next().unwrap_or(target).to_string());
 
     println!("→ checking {target}");
+    // Restarting the daemon interrupts running turns, so refuse unless told otherwise.
+    let busy = Command::new("ssh").args(["-o", "BatchMode=yes", target, "~/.local/bin/outpost busy"]).output().await?;
+    if busy.status.code() == Some(3) && !force {
+        bail!(
+            "{name} has agents mid-turn:\n{}\nwait for them, or pass --force to restart anyway",
+            String::from_utf8_lossy(&busy.stdout).trim()
+        );
+    }
     let remote = ssh(target, "uname -sm").await?;
     let local = format!("{} {}", if cfg!(target_os = "linux") { "Linux" } else { std::env::consts::OS }, std::env::consts::ARCH);
     if remote != local {
@@ -149,6 +157,50 @@ pub async fn local_info() -> Result<()> {
     });
     println!("{out}");
     Ok(())
+}
+
+/// Upgrades every remembered host to this binary.
+pub async fn update_all(force: bool) -> Result<()> {
+    let hosts = Hosts::load()?;
+    if hosts.hosts.is_empty() {
+        bail!("no hosts yet; add one with `outpost add <ssh-host>`");
+    }
+    let mut failed = vec![];
+    for (name, h) in hosts.hosts {
+        if let Err(e) = add(&h.ssh, Some(name.clone()), force).await {
+            eprintln!("✗ {name}: {e:#}");
+            failed.push(name);
+        }
+    }
+    if !failed.is_empty() {
+        bail!("{} host(s) not updated: {}", failed.len(), failed.join(", "));
+    }
+    Ok(())
+}
+
+/// Exit code 3 (with the titles on stdout) when any local session is mid-turn.
+pub async fn busy() -> Result<()> {
+    let http = reqwest::Client::builder().timeout(Duration::from_secs(3)).build()?;
+    let Ok(res) = http
+        .get(format!("http://127.0.0.1:{DAEMON_PORT}/api/sessions"))
+        .bearer_auth(config::token()?)
+        .send()
+        .await
+    else {
+        return Ok(()); // daemon not running
+    };
+    let sessions: Vec<Value> = res.json().await.unwrap_or_default();
+    let busy: Vec<&Value> = sessions
+        .iter()
+        .filter(|s| matches!(s["status"].as_str(), Some("running" | "awaiting_permission" | "starting")))
+        .collect();
+    if busy.is_empty() {
+        return Ok(());
+    }
+    for s in busy {
+        println!("  {} ({})", s["title"].as_str().unwrap_or("?"), s["status"].as_str().unwrap_or("?"));
+    }
+    std::process::exit(3);
 }
 
 pub fn tailscale_allow(login: &str) -> Result<()> {

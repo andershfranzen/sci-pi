@@ -40,6 +40,14 @@ enum Cmd {
         /// Name shown in the UI (defaults to the host part of the target).
         #[arg(long)]
         name: Option<String>,
+        /// Reinstall even if agents are mid-turn (they'll be interrupted).
+        #[arg(long)]
+        force: bool,
+    },
+    /// Push this binary to every remembered host and restart their daemons.
+    Update {
+        #[arg(long)]
+        force: bool,
     },
     /// List remembered hosts.
     Hosts,
@@ -49,6 +57,8 @@ enum Cmd {
     Doctor,
     #[command(hide = true)]
     LocalInfo,
+    #[command(hide = true)]
+    Busy,
     #[command(hide = true)]
     TailscaleAllow { login: String },
 }
@@ -65,7 +75,9 @@ async fn main() -> Result<()> {
     match Cli::parse().cmd {
         Cmd::Serve => server::serve().await,
         Cmd::Ui { port, no_open } => hub::run(port, !no_open).await,
-        Cmd::Add { target, name } => remote::add(&target, name).await,
+        Cmd::Add { target, name, force } => remote::add(&target, name, force).await,
+        Cmd::Update { force } => remote::update_all(force).await,
+        Cmd::Busy => remote::busy().await,
         Cmd::Hosts => {
             for (name, h) in config::Hosts::load()?.hosts {
                 let via = h.tailnet_url.as_deref().unwrap_or("ssh tunnel");

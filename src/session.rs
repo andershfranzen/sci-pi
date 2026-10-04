@@ -378,6 +378,50 @@ impl Manager {
         git::diff_between(Path::new(&s.cwd), &start, &end).await
     }
 
+    /// Branches a session at the end of `turn` (default: latest): same project and agent (or
+    /// another one), files restored from that turn's checkpoint into a fresh worktree, and the
+    /// conversation so far handed to the new agent from our own log – so it works for any agent.
+    pub async fn fork(self: &Arc<Self>, id: &str, turn: Option<u32>, agent: Option<String>) -> Result<Session> {
+        let src = self.require_session(id)?;
+        let upto = turn.unwrap_or(src.turns);
+        let events = self.store.events_after(0, Some(id), i64::MAX)?;
+        let end_id = events
+            .iter()
+            .find(|e| e.kind == "turn_end" && e.data["turn"] == upto)
+            .map(|e| e.id)
+            .unwrap_or(i64::MAX);
+        let checkpoint = events
+            .iter()
+            .find(|e| e.id == end_id)
+            .and_then(|e| e.data["checkpoint"].as_str().map(str::to_string));
+        let transcript = transcript(&events.iter().filter(|e| e.id <= end_id).cloned().collect::<Vec<_>>());
+
+        let forked = self
+            .create(CreateReq {
+                agent: agent.unwrap_or(src.agent.clone()),
+                project: src.project.clone(),
+                worktree: src.branch.is_some(),
+                title: Some(format!("{} (fork)", src.title)),
+                mode: src.mode.clone(),
+                prompt: None,
+                attachments: vec![],
+            })
+            .await?;
+        // A shared (non-worktree) directory already has the files; only restore isolated copies.
+        if let (Some(cp), Some(_)) = (&checkpoint, &forked.branch) {
+            git::restore(Path::new(&forked.cwd), cp).await?;
+        }
+        let h = self.require(&forked.id)?;
+        self.emit(&h, "forked", json!({ "from": id, "from_title": src.title, "turn": upto }));
+        Ok(self.update(&h, |s| {
+            s.agent_note = Some(format!(
+                "[outpost: this session is a fork of an earlier conversation, continued from its turn {upto}. \
+                 The working tree already contains the files as they were at that point. \
+                 Conversation so far, for context:]\n\n{transcript}\n\n[end of earlier conversation]"
+            ));
+        }))
+    }
+
     pub fn set_pr_url(&self, id: &str, url: String) -> Result<()> {
         let h = self.require(id)?;
         self.emit(&h, "pr_created", json!({ "url": url }));
@@ -803,7 +847,9 @@ impl Actor {
         let cwd = PathBuf::from(&s.cwd);
 
         let checkpoint = git::snapshot(&cwd, Some(&format!("refs/outpost/{}/{turn}-start", s.id))).await.ok().flatten();
-        self.emit("user_prompt", json!({ "text": item.text, "attachments": item.attachments, "turn": turn, "checkpoint": checkpoint }));
+        if let Some(ev) = self.mgr.emit(&self.h, "user_prompt", json!({ "text": item.text, "attachments": item.attachments, "turn": turn, "checkpoint": checkpoint })) {
+            let _ = self.mgr.store.index_text(&s.id, ev.id, "user", &item.text);
+        }
 
         let mut text = item.text.clone();
         let note = s.agent_note.clone();
@@ -848,6 +894,10 @@ impl Actor {
         self.cancel_pending();
         let s = self.session();
         let checkpoint = git::snapshot(Path::new(&s.cwd), Some(&format!("refs/outpost/{}/{turn}-end", s.id))).await.ok().flatten();
+        if let Ok(Some(start)) = self.mgr.store.turn_event(&s.id, "user_prompt", turn) {
+            let reply = agent_text(&self.mgr.store.events_after(start.id, Some(&s.id), i64::MAX).unwrap_or_default());
+            let _ = self.mgr.store.index_text(&s.id, start.id, "agent", &reply);
+        }
         let stop_reason = match &res {
             Ok(v) => {
                 let reason = v["stopReason"].as_str().unwrap_or("end_turn").to_string();
@@ -1023,4 +1073,48 @@ fn set_config_value(opts: &mut [Value], id: &str, value: Value) {
 
 fn resource_link(path: &Path, name: &str) -> Value {
     json!({ "type": "resource_link", "uri": format!("file://{}", path.display()), "name": name })
+}
+
+/// Concatenated agent message text in a slice of the log.
+fn agent_text(events: &[Event]) -> String {
+    events
+        .iter()
+        .filter(|e| e.kind == "update" && e.data["sessionUpdate"] == "agent_message_chunk")
+        .filter_map(|e| e.data["content"]["text"].as_str())
+        .collect()
+}
+
+/// A compact, readable transcript (prompts, replies, tool titles), trimmed from the front.
+fn transcript(events: &[Event]) -> String {
+    const LIMIT: usize = 40_000;
+    let mut out = String::new();
+    let mut last_role = "";
+    for e in events {
+        match (e.kind.as_str(), e.data["sessionUpdate"].as_str()) {
+            ("user_prompt", _) => {
+                out.push_str(&format!("\n\n## User\n{}", e.data["text"].as_str().unwrap_or_default()));
+                last_role = "user";
+            }
+            ("update", Some("agent_message_chunk")) => {
+                if last_role != "agent" {
+                    out.push_str("\n\n## Assistant\n");
+                    last_role = "agent";
+                }
+                out.push_str(e.data["content"]["text"].as_str().unwrap_or_default());
+            }
+            ("update", Some("tool_call")) => {
+                out.push_str(&format!("\n- [tool] {}", e.data["title"].as_str().unwrap_or("tool call")));
+                last_role = "tool";
+            }
+            _ => {}
+        }
+    }
+    if out.len() > LIMIT {
+        let mut cut = out.len() - LIMIT;
+        while !out.is_char_boundary(cut) {
+            cut += 1;
+        }
+        out = format!("[…earlier conversation trimmed…]{}", &out[cut..]);
+    }
+    out.trim().to_string()
 }
