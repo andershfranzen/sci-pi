@@ -24,7 +24,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Run the daemon (normally via the systemd user unit `outpost add` installs).
+    /// Run the daemon (normally via the systemd user unit `sci-pi add` installs).
     Serve,
     /// Open the multi-host UI on this machine.
     Ui {
@@ -34,7 +34,7 @@ enum Cmd {
         #[arg(long)]
         no_open: bool,
     },
-    /// Install outpost on a machine over SSH and remember it.
+    /// Install sci-pi on a machine over SSH and remember it.
     Add {
         /// SSH destination: an alias from ~/.ssh/config or user@host.
         target: String,
@@ -56,7 +56,7 @@ enum Cmd {
     Token,
     /// Check agents, Tailscale and config on this machine.
     Doctor,
-    /// Run outpost's own agent as an ACP server on stdio (the daemon does this; so can editors).
+    /// Run sci-pi's own agent as an ACP server on stdio (the daemon does this; so can editors).
     Acp,
     /// Manage model provider credentials on this host.
     Auth {
@@ -73,7 +73,7 @@ enum Cmd {
 
 #[derive(Subcommand)]
 enum AuthCmd {
-    /// Store an API key (read from stdin), e.g. `outpost auth set anthropic`.
+    /// Store an API key (read from stdin), e.g. `sci-pi auth set anthropic`.
     Set { provider: String },
     /// Show which providers have credentials.
     Status,
@@ -83,7 +83,7 @@ enum AuthCmd {
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "outpost=info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "sci_pi=info".into()),
         )
         .init();
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();

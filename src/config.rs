@@ -13,7 +13,7 @@ pub struct AgentSpec {
     pub env: BTreeMap<String, String>,
 }
 
-/// Daemon config, `~/.config/outpost/config.toml`.
+/// Daemon config, `~/.config/sci-pi/config.toml`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     #[serde(default = "default_bind")]
@@ -23,7 +23,7 @@ pub struct Config {
     pub ntfy_url: Option<String>,
     #[serde(default)]
     pub tailscale: TailscaleConfig,
-    /// outpost's own agent.
+    /// sci-pi's own agent.
     #[serde(default)]
     pub native: NativeConfig,
     #[serde(default = "default_agents")]
@@ -38,7 +38,7 @@ pub struct TailscaleConfig {
     #[serde(default = "default_port")]
     pub port: u16,
     /// Tailnet logins that may connect without a token. Empty = the node's owner
-    /// (tagged nodes have none, so `outpost add` fills this in).
+    /// (tagged nodes have none, so `sci-pi add` fills this in).
     #[serde(default)]
     pub allow: Vec<String>,
 }
@@ -73,7 +73,7 @@ pub struct ProviderConfig {
     #[serde(default)]
     pub kind: ProviderKind,
     pub base_url: String,
-    /// Env var holding the key; otherwise `outpost auth set <name>`. Local servers need none.
+    /// Env var holding the key; otherwise `sci-pi auth set <name>`. Local servers need none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_key_env: Option<String>,
     /// Empty = discover from the endpoint's `/models`.
@@ -96,10 +96,10 @@ fn default_effort() -> String {
 }
 
 /// The native agent: this binary in ACP mode.
-pub const NATIVE_AGENT: &str = "outpost";
+pub const NATIVE_AGENT: &str = "sci-pi";
 
 fn native_agent() -> AgentSpec {
-    AgentSpec { name: "outpost".into(), command: vec!["@self".into(), "acp".into()], env: BTreeMap::new() }
+    AgentSpec { name: "sci-pi".into(), command: vec!["@self".into(), "acp".into()], env: BTreeMap::new() }
 }
 
 impl Default for TailscaleConfig {
@@ -168,20 +168,20 @@ impl Config {
     }
 }
 
-/// `OUTPOST_HOME` overrides both dirs (handy for running several daemons on one box).
+/// `SCIPI_HOME` overrides both dirs (handy for running several daemons on one box).
 fn home_override() -> Option<PathBuf> {
-    std::env::var_os("OUTPOST_HOME").map(PathBuf::from)
+    std::env::var_os("SCIPI_HOME").map(PathBuf::from)
 }
 
 pub fn config_dir() -> PathBuf {
     home_override()
-        .unwrap_or_else(|| dirs::config_dir().expect("no config dir").join("outpost"))
+        .unwrap_or_else(|| dirs::config_dir().expect("no config dir").join("sci-pi"))
 }
 
 pub fn data_dir() -> PathBuf {
     home_override()
         .map(|h| h.join("data"))
-        .unwrap_or_else(|| dirs::data_dir().expect("no data dir").join("outpost"))
+        .unwrap_or_else(|| dirs::data_dir().expect("no data dir").join("sci-pi"))
 }
 
 pub fn write_private(path: &std::path::Path, contents: &str) -> Result<()> {
@@ -213,7 +213,7 @@ pub fn token() -> Result<String> {
     Ok(t)
 }
 
-/// Client-side list of remote machines, `~/.config/outpost/hosts.toml`.
+/// Client-side list of remote machines, `~/.config/sci-pi/hosts.toml`.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Hosts {
     #[serde(default)]
@@ -273,7 +273,7 @@ pub fn expand_tilde(path: &str) -> PathBuf {
     }
 }
 
-/// Provider credentials stored on this host (`~/.config/outpost/credentials.toml`, 0600).
+/// Provider credentials stored on this host (`~/.config/sci-pi/credentials.toml`, 0600).
 fn credentials_path() -> PathBuf {
     config_dir().join("credentials.toml")
 }

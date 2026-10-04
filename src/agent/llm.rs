@@ -475,7 +475,7 @@ pub fn context_window(model: &str) -> u64 {
 }
 
 pub fn no_key(provider: &str) -> anyhow::Error {
-    anyhow!("no API key for {provider}; run `outpost auth set {provider}` on this host (or set the env var)")
+    anyhow!("no API key for {provider}; run `sci-pi auth set {provider}` on this host (or set the env var)")
 }
 
 /// Model ids an OpenAI-style `/models` endpoint offers.

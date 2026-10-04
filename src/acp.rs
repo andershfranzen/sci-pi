@@ -45,7 +45,7 @@ impl Conn {
         cwd: &Path,
     ) -> Result<(Arc<Conn>, mpsc::UnboundedReceiver<Incoming>)> {
         let (program, args) = command.split_first().ok_or_else(|| anyhow!("empty agent command"))?;
-        // "@self" is this binary: the native agent runs as `outpost acp`.
+        // "@self" is this binary: the native agent runs as `sci-pi acp`.
         let program = if program == "@self" { self_exe()? } else { program.clone() };
         let mut child = Command::new(&program)
             .args(args)

@@ -1,4 +1,4 @@
-//! `outpost add <ssh-host>`: install this very binary on a remote machine as a systemd user
+//! `sci-pi add <ssh-host>`: install this very binary on a remote machine as a systemd user
 //! service, then remember the host (and its tailnet URL, if it has one) for the hub.
 
 use crate::config::{self, Config, Host, Hosts, DAEMON_PORT};
@@ -12,19 +12,19 @@ use tokio::process::Command;
 
 const INSTALL: &str = r#"
 set -e
-mkdir -p ~/.local/bin ~/.config/systemd/user ~/.config/outpost
-mv -f ~/.local/bin/outpost.new ~/.local/bin/outpost
+mkdir -p ~/.local/bin ~/.config/systemd/user ~/.config/sci-pi
+mv -f ~/.local/bin/sci-pi.new ~/.local/bin/sci-pi
 # systemd user services get a bare PATH; capture the login shell's so npx/claude/codex resolve.
-"${SHELL:-bash}" -lic 'printf "\nPATH=%s\n" "$PATH"' 2>/dev/null </dev/null | grep '^PATH=' | tail -1 > ~/.config/outpost/env || true
-if [ -n "$1" ]; then ~/.local/bin/outpost tailscale-allow "$1"; fi
-cat > ~/.config/systemd/user/outpost.service <<'UNIT'
+"${SHELL:-bash}" -lic 'printf "\nPATH=%s\n" "$PATH"' 2>/dev/null </dev/null | grep '^PATH=' | tail -1 > ~/.config/sci-pi/env || true
+if [ -n "$1" ]; then ~/.local/bin/sci-pi tailscale-allow "$1"; fi
+cat > ~/.config/systemd/user/sci-pi.service <<'UNIT'
 [Unit]
-Description=outpost coding-agent daemon
+Description=sci-pi coding-agent daemon
 After=network-online.target
 
 [Service]
-EnvironmentFile=-%h/.config/outpost/env
-ExecStart=%h/.local/bin/outpost serve
+EnvironmentFile=-%h/.config/sci-pi/env
+ExecStart=%h/.local/bin/sci-pi serve
 Restart=always
 RestartSec=2
 
@@ -32,12 +32,12 @@ RestartSec=2
 WantedBy=default.target
 UNIT
 systemctl --user daemon-reload
-systemctl --user enable outpost >/dev/null 2>&1
-systemctl --user restart outpost
+systemctl --user enable sci-pi >/dev/null 2>&1
+systemctl --user restart sci-pi
 if ! loginctl enable-linger "$USER" 2>/dev/null; then
-  echo "warning: couldn't enable lingering; outpost will stop when you log out. Fix: sudo loginctl enable-linger $USER" >&2
+  echo "warning: couldn't enable lingering; sci-pi will stop when you log out. Fix: sudo loginctl enable-linger $USER" >&2
 fi
-~/.local/bin/outpost local-info
+~/.local/bin/sci-pi local-info
 "#;
 
 async fn ssh(target: &str, cmd: &str) -> Result<String> {
@@ -53,7 +53,7 @@ pub async fn add(target: &str, name: Option<String>, force: bool) -> Result<()> 
 
     println!("→ checking {target}");
     // Restarting the daemon interrupts running turns, so refuse unless told otherwise.
-    let busy = Command::new("ssh").args(["-o", "BatchMode=yes", target, "~/.local/bin/outpost busy"]).output().await?;
+    let busy = Command::new("ssh").args(["-o", "BatchMode=yes", target, "~/.local/bin/sci-pi busy"]).output().await?;
     if busy.status.code() == Some(3) && !force {
         bail!(
             "{name} has agents mid-turn:\n{}\nwait for them, or pass --force to restart anyway",
@@ -66,13 +66,13 @@ pub async fn add(target: &str, name: Option<String>, force: bool) -> Result<()> 
         bail!("{target} is `{remote}` but this binary is `{local}`; cross-platform installs aren't supported yet");
     }
 
-    println!("→ uploading outpost");
+    println!("→ uploading sci-pi");
     ssh(target, "mkdir -p ~/.local/bin").await?;
     let exe = std::env::current_exe()?;
     let status = Command::new("scp")
         .args(["-q", "-o", "BatchMode=yes"])
         .arg(&exe)
-        .arg(format!("{target}:.local/bin/outpost.new"))
+        .arg(format!("{target}:.local/bin/sci-pi.new"))
         .status()
         .await?;
     if !status.success() {
@@ -113,7 +113,7 @@ pub async fn add(target: &str, name: Option<String>, force: bool) -> Result<()> 
     );
     hosts.save()?;
 
-    println!("✓ {name} is running outpost {}", info["version"].as_str().unwrap_or("?"));
+    println!("✓ {name} is running sci-pi {}", info["version"].as_str().unwrap_or("?"));
     match tailnet_url {
         Some(url) => {
             println!("  tailnet: {url}");
@@ -123,7 +123,7 @@ pub async fn add(target: &str, name: Option<String>, force: bool) -> Result<()> 
         }
         None => println!("  reached over SSH (no Tailscale on {name})"),
     }
-    println!("  open the UI with: outpost ui");
+    println!("  open the UI with: sci-pi ui");
     Ok(())
 }
 
@@ -149,7 +149,7 @@ pub async fn local_info() -> Result<()> {
         }
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
-    let Some(ping) = ping else { bail!("outpost daemon didn't start; see: journalctl --user -u outpost") };
+    let Some(ping) = ping else { bail!("sci-pi daemon didn't start; see: journalctl --user -u sci-pi") };
     let out = serde_json::json!({
         "token": config::token()?,
         "version": ping["version"],
@@ -163,7 +163,7 @@ pub async fn local_info() -> Result<()> {
 pub async fn update_all(force: bool) -> Result<()> {
     let hosts = Hosts::load()?;
     if hosts.hosts.is_empty() {
-        bail!("no hosts yet; add one with `outpost add <ssh-host>`");
+        bail!("no hosts yet; add one with `sci-pi add <ssh-host>`");
     }
     let mut failed = vec![];
     for (name, h) in hosts.hosts {

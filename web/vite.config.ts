@@ -12,8 +12,8 @@ export default defineConfig({
   server: {
     // `bun run dev` against the mock (`bun run mock`) or a local daemon.
     proxy: {
-      "/api": { target: process.env.OUTPOST_API ?? "http://127.0.0.1:7499", ws: true },
-      "/hub": { target: process.env.OUTPOST_API ?? "http://127.0.0.1:7499" },
+      "/api": { target: process.env.SCIPI_API ?? "http://127.0.0.1:7499", ws: true },
+      "/hub": { target: process.env.SCIPI_API ?? "http://127.0.0.1:7499" },
     },
   },
 });

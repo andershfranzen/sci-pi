@@ -1,6 +1,6 @@
-# Inspiration: T3 Code and OMP vs outpost
+# Inspiration: T3 Code and OMP vs sci-pi
 
-Researched 2026-10-04. Requirement: outpost must be **at least as good as T3 Code and OMP**.
+Researched 2026-10-04. Requirement: sci-pi must be **at least as good as T3 Code and OMP**.
 
 Snapshots examined:
 
@@ -104,14 +104,14 @@ OMP is **an agent, not a harness.** It is a fork of Mario Zechner's pi-mono with
 - `omp stream`: a public live broadcast.
 - `ssh://` paths and `omp ssh` hosts, so the agent's own tools can reach other machines.
 
-**Relevance to outpost:** `omp acp` makes OMP a candidate **fourth agent** for outpost, and outpost would then be
+**Relevance to sci-pi:** `omp acp` makes OMP a candidate **fourth agent** for sci-pi, and sci-pi would then be
 the daemon and GUI that OMP users are asking for.
 
 ---
 
 ## 2. Feature matrix
 
-outpost-MVP baseline, as given:
+sci-pi-MVP baseline, as given:
 
 - an ACP adapter for Claude, Codex and OpenCode;
 - durable sessions that survive client disconnect;
@@ -126,7 +126,7 @@ outpost-MVP baseline, as given:
 - a multi-host hub;
 - direct Tailscale access with whois auth.
 
-Everything else is ❌ unless a note says otherwise. A few ◐ cells reflect what is already in the outpost tree:
+Everything else is ❌ unless a note says otherwise. A few ◐ cells reflect what is already in the sci-pi tree:
 
 - a context meter: `web/src/components/SessionView.tsx`;
 - plan and thought rendering: `web/src/components/Timeline.tsx`;
@@ -134,7 +134,7 @@ Everything else is ❌ unless a note says otherwise. A few ◐ cells reflect wha
 
 ### Runtime and architecture
 
-| Feature | T3 Code | OMP | outpost-MVP |
+| Feature | T3 Code | OMP | sci-pi-MVP |
 |---|---|---|---|
 | How agents run | Wraps vendor SDKs, app-server, ACP and RPC per provider | Own agent loop that calls LLM APIs directly | Wraps agents via ACP (agent commands configurable in `src/config.rs`) |
 | Agents and providers | Codex, Claude, Cursor, Grok, OpenCode 1/2, Pi, Antigravity, any ACP Registry agent | 60+ LLM providers, OAuth subscriptions, local models | Claude, Codex, OpenCode (ACP) |
@@ -148,7 +148,7 @@ Everything else is ❌ unless a note says otherwise. A few ◐ cells reflect wha
 
 ### Sessions and threads
 
-| Feature | T3 Code | OMP | outpost-MVP |
+| Feature | T3 Code | OMP | sci-pi-MVP |
 |---|---|---|---|
 | Session list with live status | ✅ sidebar with Working, Pinned, Active, Snoozed and Settled sections (`t3:docs/user/thread-sidebar.md`) | ◐ `/resume` picker, `/pin` | ◐ sidebar plus status |
 | Pin, reorder, archive, snooze, settle, undo | ✅ all; drag between sections; mod+z undo | ◐ pin and rename | ❌ |
@@ -164,7 +164,7 @@ Everything else is ❌ unless a note says otherwise. A few ◐ cells reflect wha
 
 ### Composer and input
 
-| Feature | T3 Code | OMP | outpost-MVP |
+| Feature | T3 Code | OMP | sci-pi-MVP |
 |---|---|---|---|
 | Queue a follow-up | ✅ stored on the server; edit, reorder, promote to steer | ✅ `/queue`, Ctrl+Enter, Alt+Up dequeue | ✅ (count only, no edit or reorder) |
 | Steer the running turn | ✅ when the adapter supports it | ✅ Enter while running | ❌ |
@@ -179,7 +179,7 @@ Everything else is ❌ unless a note says otherwise. A few ◐ cells reflect wha
 
 ### Agent control
 
-| Feature | T3 Code | OMP | outpost-MVP |
+| Feature | T3 Code | OMP | sci-pi-MVP |
 |---|---|---|---|
 | Permission modes | ✅ Supervised, Auto-accept edits, Auto (AI review), Full access; per-project default (`t3:docs/user/permission-modes.md`) | ✅ `always-ask`, `write`, `yolo` (**yolo is the default**), per-tool allow/deny/prompt policy (`omp:docs/approval-mode.md`) | ✅ ACP modes plus approvals |
 | Cross-session approval inbox | ◐ per-thread panels, sidebar badges, push | ❌ | ✅ `/api/inbox` |
@@ -196,7 +196,7 @@ Everything else is ❌ unless a note says otherwise. A few ◐ cells reflect wha
 
 ### Multi-agent
 
-| Feature | T3 Code | OMP | outpost-MVP |
+| Feature | T3 Code | OMP | sci-pi-MVP |
 |---|---|---|---|
 | Many parallel sessions | ✅ | ◐ one per terminal | ✅ (and across hosts) |
 | Subagent visibility | ✅ Agents panel; subagents are read-only child threads | ✅ Agent Hub (Alt+A): live roster, cost, transcript, steer, revive, kill (`omp:docs/agent-hub.md`) | ❌ |
@@ -206,10 +206,10 @@ Everything else is ❌ unless a note says otherwise. A few ◐ cells reflect wha
 
 ### Git, worktrees and review
 
-| Feature | T3 Code | OMP | outpost-MVP |
+| Feature | T3 Code | OMP | sci-pi-MVP |
 |---|---|---|---|
 | Worktree per session | ✅ per thread or project default; "New thread in this worktree" | ✅ per subagent; isolation backends: git worktree, APFS, btrfs, ZFS, reflink, overlayfs (`omp:packages/coding-agent/src/task/settings.ts`); `/wt` | ✅ |
-| Branch naming | ✅ static prefix, AI semantic prefix, or custom instructions | ◐ | ◐ `outpost/<id>` |
+| Branch naming | ✅ static prefix, AI semantic prefix, or custom instructions | ◐ | ◐ `sci-pi/<id>` |
 | Worktree setup scripts | ✅ `t3.json` `runOnWorktreeCreate`, cancellable progress | ◐ runs `post-checkout` hooks | ❌ |
 | Worktree cleanup policy | ✅ inactivity, merged or empty; per project (`t3:docs/user/project-settings.md`) | ✅ `omp worktree clear` | ◐ delete with `remove_worktree=1` |
 | Diff view | ✅ scopes: turn, working tree, branch; file tree; hide whitespace; colour palettes; line comments sent to the agent | ✅ `omp git` full-screen split diff, staging, commit composer | ✅ diff against base |
@@ -222,7 +222,7 @@ Everything else is ❌ unless a note says otherwise. A few ◐ cells reflect wha
 
 ### Workspace tools
 
-| Feature | T3 Code | OMP | outpost-MVP |
+| Feature | T3 Code | OMP | sci-pi-MVP |
 |---|---|---|---|
 | Integrated terminal | ✅ per-thread drawer (libghostty-vt); server keeps 5,000 lines / 8 MiB of scrollback (`t3:docs/user/terminal.md`) | ✅ it *is* a terminal app; PTY bash tool | ❌ |
 | File explorer and viewer | ✅ tree; HTML and PDF rendered; read-only for files outside the workspace | n/a | ❌ |
@@ -235,7 +235,7 @@ Everything else is ❌ unless a note says otherwise. A few ◐ cells reflect wha
 
 ### Notifications, remote and mobile
 
-| Feature | T3 Code | OMP | outpost-MVP |
+| Feature | T3 Code | OMP | sci-pi-MVP |
 |---|---|---|---|
 | Desktop and browser notifications | ✅ opt-in, sounds, badges | ✅ terminal notifications on completion, error and ask; OSC 9;4 progress (`omp:packages/coding-agent/src/modes/settings.ts`) | ✅ |
 | Phone push | ✅ native APNs/FCM, Live Activities, widgets; **requires T3 Connect** (`t3:docs/user/mobile-notifications.md`) | ❌ | ✅ ntfy |
@@ -249,7 +249,7 @@ Everything else is ❌ unless a note says otherwise. A few ◐ cells reflect wha
 
 ### Settings, extensibility and usage
 
-| Feature | T3 Code | OMP | outpost-MVP |
+| Feature | T3 Code | OMP | sci-pi-MVP |
 |---|---|---|---|
 | Custom keybindings | ✅ `keybindings.json` with `when` clauses (`t3:docs/user/keybindings.md`) | ✅ `keybindings.yml`, vim mode | ❌ |
 | Command palette | ✅ Cmd+K for commands, threads, PRs and settings | ◐ slash commands | ❌ |
@@ -266,21 +266,21 @@ Everything else is ❌ unless a note says otherwise. A few ◐ cells reflect wha
 
 ## 3. Prioritized gap list
 
-Tags: **[H]** = harness-only work in outpostd, the hub or the web UI. **[A]** = needs agent or adapter support (ACP capability or
+Tags: **[H]** = harness-only work in sci-pi daemon, the hub or the web UI. **[A]** = needs agent or adapter support (ACP capability or
 vendor adapter behaviour). **[H+A]** = harness work that degrades gracefully when the agent lacks the capability.
 
 ### P0: needed to credibly claim "at least as good"
 
-| # | Gap | How outpost should do it | Tag |
+| # | Gap | How sci-pi should do it | Tag |
 |---|---|---|---|
-| 1 | **Per-turn checkpoints and file revert** | At every `user_prompt` and `turn_end`, snapshot the worktree into hidden refs `refs/outpost/<session>/<turn>` (with a temporary index, like T3). Add `GET /diff?turn=N` and `POST /revert {turn, files_too}`. The snapshots live on the durable host, so they survive client and daemon restarts. | H |
+| 1 | **Per-turn checkpoints and file revert** | At every `user_prompt` and `turn_end`, snapshot the worktree into hidden refs `refs/sci-pi/<session>/<turn>` (with a temporary index, like T3). Add `GET /diff?turn=N` and `POST /revert {turn, files_too}`. The snapshots live on the durable host, so they survive client and daemon restarts. | H |
 | 2 | **Rewind and fork a conversation** | Use ACP `session/fork` (unstable) or `loadSession` where advertised. Otherwise, start a new ACP session seeded with a budgeted handoff built from **our own event log** (we own the transcript, so this works for every agent). Add "Edit from here" in the UI. | H+A |
-| 3 | **Composer essentials** | `@` fuzzy file search served by the daemon (a gitignore-aware index per worktree); paste or drag images sent as ACP `image` blocks when `promptCapabilities.image` is set, else uploaded to `~/.outpost/attachments` and passed as a resource link; large pastes become file attachments; recall with ArrowUp. | H+A |
-| 4 | **Slash-command and skill picker** | Render the `available_commands` the daemon already folds into `Session`. Commands go through as prompt text. Add outpost-native commands such as `/model`, `/plan`, `/compact`, `/fork` and `/revert`. | H |
+| 3 | **Composer essentials** | `@` fuzzy file search served by the daemon (a gitignore-aware index per worktree); paste or drag images sent as ACP `image` blocks when `promptCapabilities.image` is set, else uploaded to `~/.sci-pi/attachments` and passed as a resource link; large pastes become file attachments; recall with ArrowUp. | H+A |
+| 4 | **Slash-command and skill picker** | Render the `available_commands` the daemon already folds into `Session`. Commands go through as prompt text. Add sci-pi-native commands such as `/model`, `/plan`, `/compact`, `/fork` and `/revert`. | H |
 | 5 | **Model, effort and config switching** | Wire ACP `session/set_config_option` and `set_model`: show the agent's model list and effort levels, and remember defaults per project and agent. | A |
 | 6 | **Durable integrated terminal** | A PTY per session on the daemon with a ring-buffer scrollback, replayed on reconnect like events (`after=N`), rendered with xterm.js or ghostty-web. Use tmux semantics: it keeps running while the laptop is closed. | H |
 | 7 | **Git actions: commit, push, PR** | A daemon endpoint that runs git and `gh`, `glab` or `tea` on the remote with the remote's credentials. Write the AI commit and PR text with a cheap one-shot ACP prompt. Link the PR to the session and show a status badge. | H |
-| 8 | **Daemon as a service, plus fleet update** | `outpost service install` (systemd `--user` plus `loginctl enable-linger`, or launchd). The hub's "update all hosts" pushes the new binary over SSH, waits for idle turns, then restarts. | H |
+| 8 | **Daemon as a service, plus fleet update** | `sci-pi service install` (systemd `--user` plus `loginctl enable-linger`, or launchd). The hub's "update all hosts" pushes the new binary over SSH, waits for idle turns, then restarts. | H |
 | 9 | **Search and command palette** | SQLite FTS5 over prompts and agent messages on each daemon. The hub fans out queries in parallel across hosts. Cmd+K covers sessions, hosts, commands and actions. | H |
 | 10 | **Session hygiene** | Rename, pin, archive or settle, unread and needs-you states, and auto-titles from a cheap model when the agent sends none. Optionally auto-settle on PR merge or inactivity, evaluated on the daemon. | H |
 | 11 | **Queue editing and steer** | Make queued prompts editable, reorderable and deletable on the server (we already hold the queue). Steer is **[A]**: ACP has no mid-turn inject, so fall back to "cancel, then send" with the partial turn kept. | H+A |
@@ -288,17 +288,17 @@ vendor adapter behaviour). **[H+A]** = harness work that degrades gracefully whe
 
 ### P1: parity on what users praise
 
-| # | Gap | How outpost should do it | Tag |
+| # | Gap | How sci-pi should do it | Tag |
 |---|---|---|---|
 | 13 | Structured ask-user questions | Render agent questions (ACP elicitation, or the Codex and Claude `AskUserQuestion` tool-call pattern) in the inbox next to approvals, persist them across restarts, and answer them from push notifications. | A |
 | 14 | Retry, "resume at limit reset" and auto-resume | The daemon parses rate-limit stops and schedules continuation timers that survive restarts. Add a Snooze option and show it in the inbox. | H |
 | 15 | Subagent visibility | Group tool calls by Claude `Task` and Codex subagent IDs into collapsible child timelines with their own cost and status; if `omp acp` exposes child sessions, show them there too. | H+A |
-| 16 | Orchestration MCP (`outpost` MCP server) | Pass an HTTP MCP server in ACP `session/new` `mcpServers`, with a scoped token per session. Tools: `spawn_session(host, agent, prompt, worktree)`, `wait`, `read_session`, `send`, `link_pr`. It works **across hosts** via the hub (see §4). | H+A |
+| 16 | Orchestration MCP (`sci-pi` MCP server) | Pass an HTTP MCP server in ACP `session/new` `mcpServers`, with a scoped token per session. Tools: `spawn_session(host, agent, prompt, worktree)`, `wait`, `read_session`, `send`, `link_pr`. It works **across hosts** via the hub (see §4). | H+A |
 | 17 | Multi-agent fan-out | "Send to N": the same prompt to Claude, Codex and OpenCode (or OMP) in N worktrees, possibly on different hosts, then compare the diffs side by side and keep a winner. | H |
-| 18 | Project scripts and worktree setup | Read `.outpost.toml`, **and also `t3.json`**, for `scripts[]` and `runOnWorktreeCreate`. Run them in the session PTY with progress events, so they can be bound to keys. | H |
+| 18 | Project scripts and worktree setup | Read `.sci-pi.toml`, **and also `t3.json`**, for `scripts[]` and `runOnWorktreeCreate`. Run them in the session PTY with progress events, so they can be bound to keys. | H |
 | 19 | Dev-server preview through the daemon | Scan for listening ports in the worktree process tree and reverse-proxy them at `/preview/<session>/<port>` over the existing tunnel or tailnet, so it opens from a phone. Agent browser tools come later. | H |
 | 20 | Usage and limits dashboard | Aggregate `turn_end.usage` and cost per host, agent and model in the hub. Read subscription limits where the CLIs expose them (Codex and Claude); one option is the CLIProxyAPI hub, as T3 does. | H |
-| 21 | Compaction control | A "Compact" button on the context meter. It sends `/compact` when that is in `available_commands`; otherwise it does an outpost handoff into a fresh session. | A |
+| 21 | Compaction control | A "Compact" button on the context meter. It sends `/compact` when that is in `available_commands`; otherwise it does an sci-pi handoff into a fresh session. | A |
 | 22 | Better approvals | "Allow always for this session" and per-tool rules applied by the daemon before forwarding; "Allow all edits" from the inbox; batch approve. | H |
 | 23 | Open in editor | Generate `vscode://vscode-remote/ssh-remote+<host><path>`, Zed `ssh://` and Cursor links for the worktree and for each file in the diff. | H |
 | 24 | Inline review comments from the diff | Select lines in the diff, write a comment, and it becomes a structured context chip in the next prompt (T3's `review_comment`). | H |
@@ -307,7 +307,7 @@ vendor adapter behaviour). **[H+A]** = harness work that degrades gracefully whe
 
 ### P2: differentiators and long tail
 
-| # | Gap | How outpost should do it | Tag |
+| # | Gap | How sci-pi should do it | Tag |
 |---|---|---|---|
 | 27 | Export and share | Static HTML export from the event log; a read-only share URL gated by tailnet ACL, or Tailscale Funnel with a capability token. | H |
 | 28 | Live multiplayer with roles | Map whois identities to viewer, approver or driver roles, and attribute every prompt and approval to a person. | H |
@@ -323,23 +323,23 @@ vendor adapter behaviour). **[H+A]** = harness work that degrades gracefully whe
 
 ---
 
-## 4. Where remote-first lets outpost clearly beat both
+## 4. Where remote-first lets sci-pi clearly beat both
 
 1. **Approve from the lock screen.** ntfy and Web Push notifications can carry **action buttons** ("Allow once", "Deny",
    "Reply…") that POST straight to the daemon over the tailnet, where whois identifies the caller with no token. T3 needs T3
    Connect for push and opens the thread to act. OMP has no push at all.
 2. **No vendor account or relay.** T3's phone push and no-VPN access depend on T3 Connect (a Clerk account and Cloudflare
-   tunnels). OMP's sharing depends on a relay. outpost needs only SSH plus Tailscale (identity) plus ntfy, which can be
+   tunnels). OMP's sharing depends on a relay. sci-pi needs only SSH plus Tailscale (identity) plus ntfy, which can be
    self-hosted. Make this the headline story.
 3. **Cross-host orchestration.** In T3, "a project and its threads belong to one environment" (`t3:docs/internals/remote.md`),
-   and its orchestrator spawns threads on the same server. The outpost hub can let an agent on the laptop spawn work on the
-   GPU box or the homelab through the `outpost` MCP server (#16), with results flowing into one inbox.
+   and its orchestrator spawns threads on the same server. The sci-pi hub can let an agent on the laptop spawn work on the
+   GPU box or the homelab through the `sci-pi` MCP server (#16), with results flowing into one inbox.
 4. **Move a live session between hosts.** Push the worktree branch, replay a handoff from our event log on the target host,
    and continue there: start on the laptop, migrate to the homelab before closing the lid. T3 can only move a *draft*
    between machines.
-5. **Your OMP, finally with a GUI.** `omp acp` already exposes load, list, fork and resume. outpost becomes the daemon and web
+5. **Your OMP, finally with a GUI.** `omp acp` already exposes load, list, fork and resume. sci-pi becomes the daemon and web
    UI that `omp#5742` and `omp#436` ask for, while keeping OMP's tools (hashline, LSP, subagents).
-6. **Daemon-owned timers.** Resume at limit reset, PR babysitting, scheduled tasks and auto-settle all run in outpostd, so
+6. **Daemon-owned timers.** Resume at limit reset, PR babysitting, scheduled tasks and auto-settle all run in sci-pi daemon, so
    they keep working on a headless box with every client closed and survive daemon restarts (they are persisted as events).
 7. **Per-session preview URLs on the tailnet.** Proxy each session's dev server at a stable tailnet URL, for example
    `https://<host>.<tailnet>.ts.net:7433/p/<session>/`, so you can check the agent's UI work from a phone. T3's live

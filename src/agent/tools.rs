@@ -564,7 +564,7 @@ mod tests {
 
     #[test]
     fn edit_lines_applies_against_snapshot_coordinates() {
-        let dir = std::env::temp_dir().join(format!("outpost-test-{}", uuid::Uuid::new_v4().simple()));
+        let dir = std::env::temp_dir().join(format!("sci-pi-test-{}", uuid::Uuid::new_v4().simple()));
         std::fs::create_dir_all(&dir).unwrap();
         let f = dir.join("a.txt");
         std::fs::write(&f, "one\ntwo\nthree\nfour\nfive\n").unwrap();

@@ -45,7 +45,7 @@ End with a brief summary of what you changed and anything left open. Be concise;
 }
 
 /// AGENTS.md / CLAUDE.md from the working directory up to the filesystem root, outermost first,
-/// plus the user's own `~/.config/outpost/AGENTS.md`.
+/// plus the user's own `~/.config/sci-pi/AGENTS.md`.
 fn project_instructions(cwd: &Path) -> String {
     let mut found = vec![];
     for dir in cwd.ancestors() {

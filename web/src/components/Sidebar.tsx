@@ -53,7 +53,7 @@ export function Sidebar({
         <div className="sb-top">
           <a className="brand" href="#/" onClick={onClose}>
             <LogoMark />
-            <span>outpost</span>
+            <span>sci-pi</span>
           </a>
           <span className="spacer" />
           <button className="icon-btn" onClick={onPalette} title={`Command palette (${modKey}K)`} aria-label="Command palette">
@@ -145,7 +145,7 @@ export function Sidebar({
               Signed in via Tailscale as <strong>{host.info.viewer}</strong>
             </span>
           ) : (
-            <span>{host?.info ? `outpost ${host.info.version}` : ""}</span>
+            <span>{host?.info ? `sci-pi ${host.info.version}` : ""}</span>
           )}
         </div>
       </aside>
@@ -173,7 +173,7 @@ function SessionRow({ h, s, active, onClose }: { h: HostState; s: Session; activ
           <span className="sep">·</span>
           <span className="mono">
             {basename(s.project)}
-            {s.branch ? `/${s.branch.replace(/^outpost\//, "")}` : ""}
+            {s.branch ? `/${s.branch.replace(/^sci-pi\//, "")}` : ""}
           </span>
         </span>
       </span>

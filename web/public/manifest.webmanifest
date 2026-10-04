@@ -1,6 +1,6 @@
 {
-  "name": "outpost",
-  "short_name": "outpost",
+  "name": "sci-pi",
+  "short_name": "sci-pi",
   "description": "Remote coding agents: approve, review and steer from anywhere.",
   "start_url": "./",
   "scope": "./",

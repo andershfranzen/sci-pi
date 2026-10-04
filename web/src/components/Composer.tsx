@@ -22,7 +22,7 @@ type Picker =
 const MAX_IMAGE = 10 * 1024 * 1024;
 
 export function Composer({ h, session, busy }: { h: HostState; session: Session; busy: boolean }) {
-  const draftKey = `outpost.draft.${h.key}.${session.id}`;
+  const draftKey = `sci-pi.draft.${h.key}.${session.id}`;
   const [text, setText] = useState(() => {
     try {
       return sessionStorage.getItem(draftKey) ?? "";

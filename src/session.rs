@@ -356,7 +356,7 @@ impl Manager {
         self.emit(&h, "reverted", json!({ "turn": turn, "checkpoint": checkpoint }));
         self.update(&h, |s| {
             s.agent_note = Some(format!(
-                "[outpost: the user reverted the working tree to how it was before their prompt #{turn}. \
+                "[sci-pi: the user reverted the working tree to how it was before their prompt #{turn}. \
                  Every file change made since then has been undone; re-read files before editing them.]"
             ))
         });
@@ -415,7 +415,7 @@ impl Manager {
         self.emit(&h, "forked", json!({ "from": id, "from_title": src.title, "turn": upto }));
         Ok(self.update(&h, |s| {
             s.agent_note = Some(format!(
-                "[outpost: this session is a fork of an earlier conversation, continued from its turn {upto}. \
+                "[sci-pi: this session is a fork of an earlier conversation, continued from its turn {upto}. \
                  The working tree already contains the files as they were at that point. \
                  Conversation so far, for context:]\n\n{transcript}\n\n[end of earlier conversation]"
             ));
@@ -469,7 +469,7 @@ impl Manager {
         }
         self.kill_terminal(id);
         let s = h.state.lock().unwrap().clone();
-        git::delete_refs(Path::new(&s.project), &format!("refs/outpost/{id}/")).await;
+        git::delete_refs(Path::new(&s.project), &format!("refs/sci-pi/{id}/")).await;
         if remove_worktree {
             if let Some(branch) = &s.branch {
                 git::remove_worktree(Path::new(&s.project), Path::new(&s.cwd), branch).await?;
@@ -696,7 +696,7 @@ impl Actor {
                 json!({
                     "protocolVersion": acp::PROTOCOL_VERSION,
                     "clientCapabilities": { "fs": { "readTextFile": false, "writeTextFile": false }, "terminal": false },
-                    "clientInfo": { "name": "outpost", "version": env!("CARGO_PKG_VERSION") },
+                    "clientInfo": { "name": "sci-pi", "version": env!("CARGO_PKG_VERSION") },
                 }),
             )
             .await
@@ -846,7 +846,7 @@ impl Actor {
         self.turn = Some(turn);
         let cwd = PathBuf::from(&s.cwd);
 
-        let checkpoint = git::snapshot(&cwd, Some(&format!("refs/outpost/{}/{turn}-start", s.id))).await.ok().flatten();
+        let checkpoint = git::snapshot(&cwd, Some(&format!("refs/sci-pi/{}/{turn}-start", s.id))).await.ok().flatten();
         if let Some(ev) = self.mgr.emit(&self.h, "user_prompt", json!({ "text": item.text, "attachments": item.attachments, "turn": turn, "checkpoint": checkpoint })) {
             let _ = self.mgr.store.index_text(&s.id, ev.id, "user", &item.text);
         }
@@ -893,7 +893,7 @@ impl Actor {
         let turn = self.turn.take().unwrap_or_default();
         self.cancel_pending();
         let s = self.session();
-        let checkpoint = git::snapshot(Path::new(&s.cwd), Some(&format!("refs/outpost/{}/{turn}-end", s.id))).await.ok().flatten();
+        let checkpoint = git::snapshot(Path::new(&s.cwd), Some(&format!("refs/sci-pi/{}/{turn}-end", s.id))).await.ok().flatten();
         if let Ok(Some(start)) = self.mgr.store.turn_event(&s.id, "user_prompt", turn) {
             let reply = agent_text(&self.mgr.store.events_after(start.id, Some(&s.id), i64::MAX).unwrap_or_default());
             let _ = self.mgr.store.index_text(&s.id, start.id, "agent", &reply);
@@ -951,7 +951,7 @@ impl Actor {
                 self.mgr.push(format!("Approval needed: {}", s.title), what, "high", "warning");
             }
             Incoming::Request { id, method, .. } => {
-                self.conn().respond_error(id, -32601, &format!("outpost does not implement {method}"));
+                self.conn().respond_error(id, -32601, &format!("sci-pi does not implement {method}"));
             }
         }
     }

@@ -1,5 +1,5 @@
-//! `outpost ui`: the laptop side. Finds every reachable daemon – this machine, SSH hosts from
-//! hosts.toml (through supervised tunnels), and outpost daemons on tailnet peers – and serves
+//! `sci-pi ui`: the laptop side. Finds every reachable daemon – this machine, SSH hosts from
+//! hosts.toml (through supervised tunnels), and sci-pi daemons on tailnet peers – and serves
 //! the web UI in multi-host mode.
 
 use crate::config::{self, Hosts, DAEMON_PORT};
@@ -50,7 +50,7 @@ impl Hub {
     async fn ping(&self, base: &str) -> Option<Value> {
         let res = self.http.get(format!("{base}/api/ping")).send().await.ok()?;
         let v: Value = res.json().await.ok()?;
-        (v["outpost"] == true).then_some(v)
+        (v["sci-pi"] == true).then_some(v)
     }
 }
 
@@ -111,7 +111,7 @@ pub async fn run(port: u16, open: bool) -> Result<()> {
     let addr = format!("127.0.0.1:{port}");
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     let url = format!("http://{addr}");
-    println!("outpost hub on {url}");
+    println!("sci-pi hub on {url}");
     if open {
         let opener = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
         let _ = std::process::Command::new(opener).arg(&url).stdout(Stdio::null()).stderr(Stdio::null()).spawn();
@@ -244,7 +244,7 @@ async fn watch_local(hub: Hub) {
             None => {
                 for h in hub.hosts.lock().unwrap().values_mut().filter(|h| h.transport == "local") {
                     h.status = "error";
-                    h.error = Some(format!("no daemon answering on {url}; start it with `outpost serve`"));
+                    h.error = Some(format!("no daemon answering on {url}; start it with `sci-pi serve`"));
                 }
             }
         }
@@ -252,7 +252,7 @@ async fn watch_local(hub: Hub) {
     }
 }
 
-/// Probes online tailnet peers for outpost daemons every 30s and keeps tailnet hosts' status fresh.
+/// Probes online tailnet peers for sci-pi daemons every 30s and keeps tailnet hosts' status fresh.
 async fn discover(hub: Hub) {
     loop {
         if let Ok(peers) = tailscale::peers().await {

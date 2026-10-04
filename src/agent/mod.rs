@@ -1,4 +1,4 @@
-//! outpost's own agent, served over the Agent Client Protocol on stdio (`outpost acp`). The
+//! sci-pi's own agent, served over the Agent Client Protocol on stdio (`sci-pi acp`). The
 //! daemon runs it like any other ACP agent; editors that speak ACP can use it too.
 //!
 //! The loop: stream a model response (forwarding text, thinking and tool starts as session
@@ -154,7 +154,7 @@ impl Server {
                     "promptCapabilities": { "image": true, "embeddedContext": true },
                     "sessionCapabilities": { "resume": {} },
                 },
-                "agentInfo": { "name": "outpost", "title": "outpost", "version": env!("CARGO_PKG_VERSION") },
+                "agentInfo": { "name": "sci-pi", "title": "sci-pi", "version": env!("CARGO_PKG_VERSION") },
                 "authMethods": [],
             })),
             "session/new" => {

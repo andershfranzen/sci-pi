@@ -1289,37 +1289,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d"
 
 [[package]]
-name = "outpost"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "axum",
- "axum-server",
- "base64 0.23.1",
- "clap",
- "dirs",
- "futures",
- "globset",
- "ignore",
- "mime_guess",
- "portable-pty",
- "regex",
- "reqwest",
- "rusqlite",
- "rust-embed",
- "rustls",
- "serde",
- "serde_json",
- "tokio",
- "tokio-util",
- "toml",
- "tower-http 0.7.1",
- "tracing",
- "tracing-subscriber",
- "uuid",
-]
-
-[[package]]
 name = "parking_lot"
 version = "0.12.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1821,6 +1790,37 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "91c1b7e4904c873ef0710c1f407dde2e6287de2bebc1bbbf7d430bb7cbffd939"
 dependencies = [
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "sci-pi"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "axum-server",
+ "base64 0.23.1",
+ "clap",
+ "dirs",
+ "futures",
+ "globset",
+ "ignore",
+ "mime_guess",
+ "portable-pty",
+ "regex",
+ "reqwest",
+ "rusqlite",
+ "rust-embed",
+ "rustls",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+ "toml",
+ "tower-http 0.7.1",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]

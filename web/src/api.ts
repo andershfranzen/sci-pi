@@ -189,7 +189,7 @@ function enc(s: string) {
   return encodeURIComponent(s);
 }
 
-/** Hub detection: returns the host list if this page is served by `outpost ui`, else null. */
+/** Hub detection: returns the host list if this page is served by `sci-pi ui`, else null. */
 export async function fetchHubHosts(): Promise<HubHost[] | null> {
   try {
     const res = await fetch(`${location.origin}/hub/hosts`, { headers: { Accept: "application/json" } });

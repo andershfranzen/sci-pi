@@ -32,14 +32,14 @@ pub struct Worktree {
     pub base_commit: String,
 }
 
-/// Creates `<data>/worktrees/<repo>-<id8>` on a fresh `outpost/<id8>` branch off HEAD.
+/// Creates `<data>/worktrees/<repo>-<id8>` on a fresh `sci-pi/<id8>` branch off HEAD.
 /// If `project` is a subdirectory of the repo, the returned path points at the same subdirectory.
 pub async fn create_worktree(project: &Path, worktrees_dir: &Path, session_id: &str) -> Result<Worktree> {
     let Some(top) = toplevel(project).await else { bail!("{} is not a git repository", project.display()) };
     let short = &session_id[..8];
     let repo_name = top.file_name().and_then(|n| n.to_str()).unwrap_or("repo");
     let wt = worktrees_dir.join(format!("{repo_name}-{short}"));
-    let branch = format!("outpost/{short}");
+    let branch = format!("sci-pi/{short}");
     let base = git(&top, &["rev-parse", "HEAD"]).await?.trim().to_string();
     std::fs::create_dir_all(worktrees_dir)?;
     git(&top, &["worktree", "add", "-b", &branch, &wt.to_string_lossy(), &base]).await?;
@@ -84,7 +84,7 @@ pub async fn diff(cwd: &Path, base: Option<&str>) -> Result<Value> {
 /// Runs `f` with `GIT_INDEX_FILE` pointing at a throwaway copy of the repo's index.
 async fn with_temp_index<T>(top: &Path, f: impl AsyncFnOnce(&[(&str, &Path)]) -> Result<T>) -> Result<T> {
     let real = PathBuf::from(git(top, &["rev-parse", "--path-format=absolute", "--git-path", "index"]).await?.trim());
-    let tmp = std::env::temp_dir().join(format!("outpost-index-{}", uuid::Uuid::new_v4().simple()));
+    let tmp = std::env::temp_dir().join(format!("sci-pi-index-{}", uuid::Uuid::new_v4().simple()));
     if real.exists() {
         std::fs::copy(&real, &tmp)?;
     }
@@ -101,7 +101,7 @@ pub async fn snapshot(cwd: &Path, ref_name: Option<&str>) -> Result<Option<Strin
     let commit = with_temp_index(&top, async |env| {
         git_env(&top, &["add", "-A"], env).await?;
         let tree = git_env(&top, &["write-tree"], env).await?;
-        let mut args = vec!["-c", "user.name=outpost", "-c", "user.email=outpost@localhost", "commit-tree", tree.trim(), "-m", "outpost checkpoint"];
+        let mut args = vec!["-c", "user.name=sci-pi", "-c", "user.email=sci-pi@localhost", "commit-tree", tree.trim(), "-m", "sci-pi checkpoint"];
         if let Some(h) = &head {
             args.extend(["-p", h]);
         }

@@ -1,10 +1,10 @@
-# outpost protocol (v0)
+# sci-pi protocol (v0)
 
 Two processes speak this:
 
-- **outpostd** (`outpost serve`) runs on each remote machine, binds `127.0.0.1:7433`,
+- **sci-pi daemon** (`sci-pi serve`) runs on each remote machine, binds `127.0.0.1:7433`,
   owns agent sessions and serves the web UI.
-- **hub** (`outpost ui`) runs on your laptop at `127.0.0.1:7430`, manages SSH tunnels to
+- **hub** (`sci-pi ui`) runs on your laptop at `127.0.0.1:7430`, manages SSH tunnels to
   every configured host and serves the same web UI in multi-host mode.
 
 ## Auth & transports
@@ -23,7 +23,7 @@ Clients must therefore treat the token as optional: send `Authorization` only wh
 non-empty token, and on `401` ask for one. CORS is open (no cookies), so a UI served from one
 origin can talk to any number of daemons.
 
-`GET /api/ping` is unauthenticated: `{ outpost: true, version, host, tailnet_url: string | null }`.
+`GET /api/ping` is unauthenticated: `{ sci-pi: true, version, host, tailnet_url: string | null }`.
 
 ## Types
 
@@ -43,7 +43,7 @@ interface Session {
   agent: string;                  // key into Info.agents
   project: string;                // directory the user picked
   cwd: string;                    // where the agent runs (worktree path if worktree)
-  branch: string | null;          // worktree branch, e.g. "outpost/3f2a9c1b"
+  branch: string | null;          // worktree branch, e.g. "sci-pi/3f2a9c1b"
   base_commit: string | null;     // commit the worktree was branched from
   status: SessionStatus;
   status_message: string | null;  // error text etc.

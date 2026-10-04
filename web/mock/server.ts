@@ -1,4 +1,4 @@
-// In-memory mock of the outpost daemon API (docs/PROTOCOL.md) for UI development.
+// In-memory mock of the sci-pi daemon API (docs/PROTOCOL.md) for UI development.
 //
 //   bun run build && bun run mock      → http://127.0.0.1:7499/#token=dev
 //
@@ -221,7 +221,7 @@ async function runTurn(sid: string, text: string, atts: any[] = []) {
     sessionUpdate: "tool_call_update",
     toolCallId: tc,
     status: "completed",
-    content: [{ type: "content", content: { type: "text", text: "# outpost\n\nRemote-first coding-agent harness.\n" } }],
+    content: [{ type: "content", content: { type: "text", text: "# sci-pi\n\nRemote-first coding-agent harness.\n" } }],
   });
   if (cancelled.has(sid)) return;
   const turn = sessions.get(sid)!.turns;
@@ -403,8 +403,8 @@ async function seed() {
       title: "Refactor auth middleware to verify JWTs with jose",
       agent: "claude",
       project: `${HOME}/code/webapp`,
-      cwd: `${HOME}/.outpost/worktrees/webapp-3f2a9c1b`,
-      branch: "outpost/3f2a9c1b",
+      cwd: `${HOME}/.sci-pi/worktrees/webapp-3f2a9c1b`,
+      branch: "sci-pi/3f2a9c1b",
       base_commit: "9c1e4b7d2a5f8e3b6c0d1a2f4e5b6c7d8e9f0a1b",
       mode: "default",
       modes: MODES,
@@ -532,9 +532,9 @@ async function seed() {
       id: B,
       title: "Add rate limiting to the public API",
       agent: "codex",
-      project: `${HOME}/code/outpost`,
-      cwd: `${HOME}/.outpost/worktrees/outpost-a81c07e2`,
-      branch: "outpost/a81c07e2",
+      project: `${HOME}/code/sci-pi`,
+      cwd: `${HOME}/.sci-pi/worktrees/sci-pi-a81c07e2`,
+      branch: "sci-pi/a81c07e2",
       base_commit: "1f2e3d4c5b6a79880716253443526170",
       usage: { used: 121_400, size: 272_000 },
       config_options: codexConfig(),
@@ -578,16 +578,16 @@ async function seed() {
     {
       sessionUpdate: "tool_call",
       toolCallId: "b_t1",
-      title: "cargo test -p outpost ratelimit",
+      title: "cargo test -p sci-pi ratelimit",
       kind: "execute",
       status: "completed",
-      rawInput: { command: ["cargo", "test", "-p", "outpost", "ratelimit"] },
+      rawInput: { command: ["cargo", "test", "-p", "sci-pi", "ratelimit"] },
       content: [
         {
           type: "content",
           content: {
             type: "text",
-            text: "   Compiling outpost v0.1.0 (/home/dev/code/outpost)\n    Finished `test` profile [unoptimized + debuginfo] target(s) in 4.21s\n     Running unittests src/main.rs\n\nrunning 3 tests\ntest ratelimit::tests::refills_over_time ... ok\ntest ratelimit::tests::rejects_when_empty ... ok\ntest ratelimit::tests::separate_buckets_per_token ... ok\n\ntest result: ok. 3 passed; 0 failed; 0 ignored",
+            text: "   Compiling sci-pi v0.1.0 (/home/dev/code/sci-pi)\n    Finished `test` profile [unoptimized + debuginfo] target(s) in 4.21s\n     Running unittests src/main.rs\n\nrunning 3 tests\ntest ratelimit::tests::refills_over_time ... ok\ntest ratelimit::tests::rejects_when_empty ... ok\ntest ratelimit::tests::separate_buckets_per_token ... ok\n\ntest result: ok. 3 passed; 0 failed; 0 ignored",
           },
         },
       ],
@@ -603,11 +603,11 @@ async function seed() {
       id: C,
       title: "Fix flaky websocket reconnect test",
       agent: "opencode",
-      project: `${HOME}/code/outpost`,
-      cwd: `${HOME}/.outpost/worktrees/outpost-c7d1e0a2`,
-      branch: "outpost/c7d1e0a2",
+      project: `${HOME}/code/sci-pi`,
+      cwd: `${HOME}/.sci-pi/worktrees/sci-pi-c7d1e0a2`,
+      branch: "sci-pi/c7d1e0a2",
       base_commit: "77aa11bb22cc33dd44ee55ff66778899aabbccdd",
-      pr_url: "https://github.com/dev/outpost/pull/42",
+      pr_url: "https://github.com/dev/sci-pi/pull/42",
       modes: [
         { id: "build", name: "Build" },
         { id: "plan", name: "Plan" },
@@ -665,8 +665,8 @@ async function seed() {
   finishTurn(C, "end_turn", (t += 500));
   startTurn(C, "Commit that and open a PR.", [], (t += 60_000));
   emit(C, "git", { action: "commit", sha: "4f9e2a1c7b3d", message: "test: wait for replay cursor in ws_reconnect" }, (t += 4000));
-  emit(C, "git", { action: "push", output: "To github.com:dev/outpost.git\n * [new branch] outpost/c7d1e0a2 -> outpost/c7d1e0a2" }, (t += 3000));
-  emit(C, "pr_created", { url: "https://github.com/dev/outpost/pull/42" }, (t += 3000));
+  emit(C, "git", { action: "push", output: "To github.com:dev/sci-pi.git\n * [new branch] sci-pi/c7d1e0a2 -> sci-pi/c7d1e0a2" }, (t += 3000));
+  emit(C, "pr_created", { url: "https://github.com/dev/sci-pi/pull/42" }, (t += 3000));
   say(C, "Done — PR #42 is open.", "c3", (t += 1000));
   finishTurn(C, "end_turn", (t += 500));
   setStatus(C, "idle", t);
@@ -785,15 +785,15 @@ async function liveLoop(B: string) {
 const TREE: Record<string, { dirs: string[]; git?: boolean }> = {
   "/": { dirs: ["home", "srv", "tmp"] },
   "/home": { dirs: ["dev"] },
-  [HOME]: { dirs: [".config", ".outpost", "code", "notes", "srv"] },
+  [HOME]: { dirs: [".config", ".sci-pi", "code", "notes", "srv"] },
   [`${HOME}/.config`]: { dirs: [] },
-  [`${HOME}/.outpost`]: { dirs: ["worktrees"] },
-  [`${HOME}/.outpost/worktrees`]: { dirs: [] },
-  [`${HOME}/code`]: { dirs: ["dotfiles", "indexer", "outpost", "scratch", "webapp"] },
+  [`${HOME}/.sci-pi`]: { dirs: ["worktrees"] },
+  [`${HOME}/.sci-pi/worktrees`]: { dirs: [] },
+  [`${HOME}/code`]: { dirs: ["dotfiles", "indexer", "sci-pi", "scratch", "webapp"] },
   [`${HOME}/code/dotfiles`]: { dirs: [".git", "nvim", "zsh"], git: true },
   [`${HOME}/code/indexer`]: { dirs: [".git", "src", "benches"], git: true },
-  [`${HOME}/code/outpost`]: { dirs: [".git", "docs", "src", "web"], git: true },
-  [`${HOME}/code/outpost/web`]: { dirs: ["mock", "src"] },
+  [`${HOME}/code/sci-pi`]: { dirs: [".git", "docs", "src", "web"], git: true },
+  [`${HOME}/code/sci-pi/web`]: { dirs: ["mock", "src"] },
   [`${HOME}/code/scratch`]: { dirs: [] },
   [`${HOME}/code/webapp`]: { dirs: [".git", "public", "src", "test"], git: true },
   [`${HOME}/notes`]: { dirs: [] },
@@ -1012,7 +1012,7 @@ function sessionDiff(s: Session) {
 async function api(req: Request, url: URL): Promise<Response> {
   const path = url.pathname.slice(4); // strip /api
   const m = req.method;
-  if (path === "/ping") return json({ outpost: true, version: "0.2.0-mock", host: "devbox", tailnet_url: info(false).tailnet_url });
+  if (path === "/ping") return json({ sci-pi: true, version: "0.2.0-mock", host: "devbox", tailnet_url: info(false).tailnet_url });
 
   const auth = authorize(req, url);
   if (!auth.ok) return err(401, "unauthorized");
@@ -1051,8 +1051,8 @@ async function api(req: Request, url: URL): Promise<Response> {
         title: b.title || (b.prompt ? String(b.prompt).split("\n")[0].slice(0, 60) : `New session in ${name}`),
         agent: b.agent,
         project: b.project,
-        cwd: b.worktree ? `${HOME}/.outpost/worktrees/${name}-${short}` : b.project,
-        branch: b.worktree ? `outpost/${short}` : null,
+        cwd: b.worktree ? `${HOME}/.sci-pi/worktrees/${name}-${short}` : b.project,
+        branch: b.worktree ? `sci-pi/${short}` : null,
         base_commit: b.worktree ? "0123456789abcdef0123456789abcdef01234567" : null,
         status: "starting",
         mode: b.mode || "default",
@@ -1196,8 +1196,8 @@ async function api(req: Request, url: URL): Promise<Response> {
         title: `${s.title} (fork)`,
         agent,
         project: s.project,
-        cwd: `${HOME}/.outpost/worktrees/${s.project.split("/").pop()}-${short}`,
-        branch: `outpost/${short}`,
+        cwd: `${HOME}/.sci-pi/worktrees/${s.project.split("/").pop()}-${short}`,
+        branch: `sci-pi/${short}`,
         base_commit: s.base_commit,
         status: "idle",
         modes: agent === "claude" ? MODES : [],
@@ -1481,4 +1481,4 @@ server = Bun.serve<WsData>({
 
 setInterval(() => broadcast({ type: "ping" }), 25_000);
 
-console.log(`outpost mock on http://127.0.0.1:${PORT}/#token=${TOKEN}${HUB ? "  (hub mode)" : ""}`);
+console.log(`sci-pi mock on http://127.0.0.1:${PORT}/#token=${TOKEN}${HUB ? "  (hub mode)" : ""}`);

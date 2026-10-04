@@ -46,7 +46,7 @@ pub async fn serve() -> Result<()> {
     let cfg = Config::load_or_init()?;
     let data_dir = config::data_dir();
     std::fs::create_dir_all(&data_dir)?;
-    let store = Arc::new(Store::open(&data_dir.join("outpost.db"))?);
+    let store = Arc::new(Store::open(&data_dir.join("sci-pi.db"))?);
     let token: Arc<str> = config::token()?.into();
     let mgr = Manager::new(cfg.clone(), store, &data_dir)?;
     mgr.resume_queues();
@@ -236,7 +236,7 @@ fn hostname() -> String {
 async fn ping(State(st): State<AppState>) -> Json<Value> {
     let tailnet_url = st.tailnet.read().unwrap().as_ref().map(|t| t.url.clone());
     Json(json!({
-        "outpost": true,
+        "sci-pi": true,
         "version": env!("CARGO_PKG_VERSION"),
         "host": hostname(),
         "tailnet_url": tailnet_url,
@@ -244,7 +244,7 @@ async fn ping(State(st): State<AppState>) -> Json<Value> {
 }
 
 async fn info(State(st): State<AppState>, Extension(viewer): Extension<Viewer>) -> ApiResult {
-    // outpost's own agent first, so it's the default pick in the UI.
+    // sci-pi's own agent first, so it's the default pick in the UI.
     let mut agents: Vec<(&String, &crate::config::AgentSpec)> = st.mgr.cfg.agents.iter().collect();
     agents.sort_by_key(|(id, _)| id.as_str() != crate::config::NATIVE_AGENT);
     let agents: Vec<Value> = agents.into_iter().map(|(id, a)| json!({ "id": id, "name": a.name })).collect();
@@ -462,7 +462,7 @@ async fn git_pr(State(st): State<AppState>, Path(id): Path<String>, Json(req): J
     let title = req.title.filter(|t| !t.trim().is_empty()).unwrap_or_else(|| s.title.clone());
     let body = req.body.filter(|b| !b.trim().is_empty()).unwrap_or_else(|| {
         let summary = st.mgr.store.last_agent_text(&id).ok().flatten().unwrap_or_default();
-        format!("{summary}\n\n_Opened from an outpost session._")
+        format!("{summary}\n\n_Opened from an sci-pi session._")
     });
     let cwd = std::path::Path::new(&s.cwd);
     crate::git::push(cwd).await?;

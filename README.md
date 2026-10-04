@@ -1,74 +1,103 @@
-# outpost
+# sci-pi
 
-Remote-first coding agents. Install a headless daemon on the machines you own, then drive
-Claude Code, Codex or OpenCode on them from your laptop, a browser or your phone. Close the
-laptop; the agents keep going, and the approvals and results wait for you.
+A remote-first coding agent harness, written in Rust. Install one binary on the machines you
+own; drive its agents from your laptop, a browser or your phone. Close the laptop – the agents
+keep working, and approvals and results wait for you.
 
 ```
- laptop / phone                               your machines
- ┌──────────────────┐   tailnet (direct)    ┌──────────────────────────────────┐
- │ web UI           │ ────────────────────► │ outpost serve  (systemd --user)  │
- │  outpost ui (hub)│   or SSH tunnel       │  ├─ session actors ─► ACP agents │
- └──────────────────┘ ────────────────────► │  ├─ SQLite event log             │
-          ▲  ntfy push: "approval needed"   │  ├─ git worktree per session     │
-          └─────────────────────────────────┤  └─ diff / inbox / fs API        │
-                                            └──────────────────────────────────┘
+ laptop / phone                                your machines
+ ┌───────────────────┐   tailnet (direct)    ┌───────────────────────────────────────┐
+ │ web UI            │ ────────────────────► │ sci-pi serve   (systemd --user)       │
+ │  sci-pi ui (hub)  │   or SSH tunnel       │  ├─ session actors ──► agents (ACP)   │
+ └───────────────────┘ ────────────────────► │  │    ├─ sci-pi acp  (native harness)  │
+          ▲  push: "approval needed"         │  │    └─ Claude Code, Codex, OpenCode… │
+          └──────────────────────────────────┤  ├─ SQLite event log + checkpoints    │
+                                             │  └─ worktrees, terminal, git, search  │
+                                             └───────────────────────────────────────┘
 ```
 
-## How it works
+## The harness
 
-- **Sessions are event-sourced.** Every chunk, tool call, approval and turn is appended to
-  SQLite. UIs are viewers: they replay from a cursor and stream live, so a laptop that slept
-  for six hours catches up exactly, and several devices can watch one session.
-- **Agents speak ACP** ([Agent Client Protocol](https://agentclientprotocol.com)). outpost
-  doesn't ship its own agent loop; any ACP agent works (`config.toml` → `[agents.*]`).
-- **Sessions outlive everything.** Client disconnects don't matter; the daemon restarting
-  marks sessions `detached` and the next prompt resumes the agent's own context
-  (`session/resume`, falling back to `session/load`).
-- **Approvals are asynchronous.** Permission requests land in an inbox across sessions and hosts
-  and are pushed via ntfy; answer from any device.
-- **Worktree per session** (optional) so parallel agents never collide; the diff view compares
-  against the commit the worktree branched from, untracked files included.
+`sci-pi acp` is sci-pi's own agent loop, served over the
+[Agent Client Protocol](https://agentclientprotocol.com) – the daemon runs it, and ACP editors
+(Zed, …) can too.
 
-## Tailscale (native)
+- **Providers, over raw HTTP:** the Anthropic Messages API (streaming, adaptive thinking,
+  effort, prompt caching, refusal fallbacks), any OpenAI-compatible endpoint (OpenAI,
+  OpenRouter, llama.cpp, vLLM, Ollama), and [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI)
+  servers (models discovered automatically).
+- **Line-addressed edits.** `read_file` tags each file version with a short hash and numbers its
+  lines; `edit_lines` replaces line ranges against that tag. The model never re-types old code,
+  stale edits are rejected, and every edit returns the renumbered region so edits chain without
+  re-reading.
+- **Fast paths:** grep/glob in-process (ripgrep's crates), independent read-only tool calls in
+  parallel, long output clipped to head and tail, a stable prompt prefix that stays cached,
+  @-mentioned files inlined with their tag.
+- **Modes:** ask, accept edits, plan (read-only), autonomous – approvals show the diff and can
+  be answered from any device.
+- **Durable:** history is saved after every step; a restarted agent resumes the session and
+  closes out tool calls that were interrupted.
 
-When `tailscaled` runs on a host, the daemon also listens on its tailnet IPs (`:7433`):
+Other ACP agents (Claude Code, Codex, OpenCode, oh-my-pi) can be used per session instead.
 
-- **HTTPS** with a Tailscale-issued cert when the daemon may fetch one
-  (`sudo tailscale set --operator=$USER` on that host), else plain HTTP over WireGuard.
-- **No tokens on the tailnet**: callers are identified with tailscaled's `whois`; logins in
-  `tailscale.allow` (default: the node's owner; `outpost add` adds yours) get in directly.
-  Open `https://<host>.<tailnet>.ts.net:7433` on your phone and you're in.
-- **Discovery**: `outpost ui` probes online tailnet peers and lists every outpost it finds.
+## The platform
+
+- **Event-sourced sessions.** Every chunk, tool call and approval is appended to SQLite. UIs
+  replay from a cursor and stream live, so a laptop that slept for hours catches up exactly.
+- **Checkpoints** before and after every turn (git refs, untracked files included): per-turn
+  diffs, revert, and fork-from-any-turn – even onto a different agent.
+- **Worktree per session**, an editable prompt queue, a persistent terminal per session,
+  commit/push/PR on the host, full-text search across sessions and hosts.
+- **Native Tailscale:** the daemon listens on the tailnet with a Tailscale HTTPS cert and
+  identifies callers with `whois` – no tokens on your tailnet. The hub discovers every sci-pi
+  on it.
 
 ## Usage
 
 ```sh
-cargo build --release            # embeds web/dist (cd web && bun install && bun run build first)
+cd web && bun install && bun run build && cd ..   # the UI is embedded in the binary
+cargo build --release
 
-outpost add homelab              # scp itself over, install systemd user unit, enable linger
-outpost ui                       # hub on http://127.0.0.1:7430 with every host
-outpost doctor                   # agents on PATH? tailscale? https?
+sci-pi add homelab        # install on a host over SSH (systemd user unit + linger)
+sci-pi ui                 # multi-host UI on http://127.0.0.1:7430
+sci-pi auth set anthropic # store a provider key on this host (reads stdin)
+sci-pi doctor             # agents, Tailscale, HTTPS
+sci-pi update             # push this build to every host (refuses while agents are mid-turn)
 ```
 
-On the remote host, agents need their own runtime and login (e.g. `npx` and a logged-in
-`claude`). The install captures your login shell's `PATH` into `~/.config/outpost/env`, so
-whatever works in your shell works for the daemon.
-
-Config lives in `~/.config/outpost/config.toml`:
+`~/.config/sci-pi/config.toml`:
 
 ```toml
-bind = "127.0.0.1:7433"
-ntfy_url = "https://ntfy.sh/your-secret-topic"   # optional push
+[native]
+model = "claude-opus-5-5"        # or "<provider>/<model>"
+effort = "xhigh"
+
+[native.providers.cliproxy]      # a CLIProxyAPI server
+kind = "cliproxy"
+base_url = "https://homelab.example.ts.net"
+
+[native.providers.local]         # any OpenAI-compatible server
+base_url = "http://gpu-box:8080/v1"
+models = ["qwen3.6-35b"]
 
 [tailscale]
-enabled = true
-port = 7433
 allow = ["you@example.com"]
 
-[agents.claude]
-name = "Claude Code"
-command = ["npx", "-y", "@agentclientprotocol/claude-agent-acp"]
+ntfy_url = "https://ntfy.sh/your-secret-topic"   # optional phone push
 ```
 
-See [docs/PROTOCOL.md](docs/PROTOCOL.md) for the API.
+Keys come from `<PROVIDER>_API_KEY` env vars or `sci-pi auth set <provider>`.
+
+A note on subscriptions: ChatGPT plans can be used by third-party tools. Claude Pro/Max
+subscriptions may only be used through Anthropic's own Claude Code – run Claude Code as the
+session's agent for that, or use an API key with sci-pi's harness.
+
+See [docs/PROTOCOL.md](docs/PROTOCOL.md) for the daemon API.
+
+## Acknowledgements
+
+sci-pi stands on [pi](https://github.com/earendil-works/pi) by Mario Zechner and
+[oh-my-pi](https://github.com/can1357/oh-my-pi) by can1357 (both MIT): the line-addressed
+"hashline" editing approach and much of the thinking about what makes a harness fast come from
+them – hence the name. The code here is an independent Rust implementation.
+[T3 Code](https://github.com/pingdotgg/t3code) shaped a lot of the UI.

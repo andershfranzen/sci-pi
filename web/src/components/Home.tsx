@@ -15,7 +15,7 @@ export function Home({ onMenu, onNew }: { onMenu: () => void; onNew: () => void 
         <button className="icon-btn menu-btn" onClick={onMenu} aria-label="Open sidebar">
           <IconMenu />
         </button>
-        <h1>{h?.info?.host ?? h?.name ?? "outpost"}</h1>
+        <h1>{h?.info?.host ?? h?.name ?? "sci-pi"}</h1>
       </header>
       <div className="page-scroll">
         <div className="home">

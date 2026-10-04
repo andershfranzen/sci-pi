@@ -15,10 +15,10 @@ export function TokenScreen() {
       >
         <div className="token-brand">
           <LogoMark size={28} />
-          <span>outpost</span>
+          <span>sci-pi</span>
         </div>
         <p className="dim">
-          This daemon needs a token. <code>outpost serve</code> prints a link with <code>#token=…</code>, or paste the token here.
+          This daemon needs a token. <code>sci-pi serve</code> prints a link with <code>#token=…</code>, or paste the token here.
         </p>
         <input
           type="password"

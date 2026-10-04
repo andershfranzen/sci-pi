@@ -7,7 +7,7 @@ import { cx, tildify } from "../util";
 import { Modal } from "./Modal";
 import { IconChevron, IconFolder, IconGit } from "./Icons";
 
-const LAST_KEY = "outpost.lastNew";
+const LAST_KEY = "sci-pi.lastNew";
 
 interface Last {
   agent?: string;

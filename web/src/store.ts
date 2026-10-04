@@ -39,9 +39,9 @@ export interface HostState {
 
 export type AppMode = "loading" | "hub" | "direct" | "need_token";
 
-const TOKEN_KEY = "outpost.token";
-const HOST_KEY = "outpost.selectedHost";
-const NOTIFY_KEY = "outpost.notify";
+const TOKEN_KEY = "sci-pi.token";
+const HOST_KEY = "sci-pi.selectedHost";
+const NOTIFY_KEY = "sci-pi.notify";
 
 function lsGet(k: string): string | null {
   try {

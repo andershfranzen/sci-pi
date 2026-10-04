@@ -1,4 +1,4 @@
-/* outpost web UI — hand-written, token-driven. Dark by default, light via prefers-color-scheme. */
+/* sci-pi web UI — hand-written, token-driven. Dark by default, light via prefers-color-scheme. */
 
 :root {
   --bg: #0d0e10;

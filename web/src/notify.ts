@@ -33,7 +33,7 @@ export function maybeNotify(h: HostState, s: Session | undefined, e: OEvent) {
   try {
     const n = new Notification(`${title}${where}`, {
       body,
-      tag: `outpost:${h.key}:${e.session_id}`,
+      tag: `sci-pi:${h.key}:${e.session_id}`,
     });
     n.onclick = () => {
       window.focus();

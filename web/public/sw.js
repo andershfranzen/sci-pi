@@ -1,7 +1,7 @@
-// outpost service worker: caches the app shell only. API, hub and WebSocket traffic is never
+// sci-pi service worker: caches the app shell only. API, hub and WebSocket traffic is never
 // touched (it carries live state and auth), and cross-origin requests (other daemons in hub
 // mode) pass straight through.
-const CACHE = "outpost-shell-v1";
+const CACHE = "sci-pi-shell-v1";
 const SHELL = ["./", "./manifest.webmanifest", "./icons/icon-192.png", "./icons/icon.svg"];
 
 self.addEventListener("install", (e) => {
