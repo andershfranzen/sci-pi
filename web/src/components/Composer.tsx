@@ -4,7 +4,9 @@ import { getTimeline } from "../store";
 import { promptHistory } from "../timeline";
 import type { AttachmentIn, ConfigOption, QueueItem, Session, SlashCommand } from "../types";
 import { basename, cx, fuzzyScore, isTouch, readFileBase64 } from "../util";
-import { IconArrowUp, IconAt, IconCheck, IconEdit, IconFile, IconImage, IconTrash, IconX, IconZap } from "./Icons";
+import { IconArrowUp, IconAt, IconCheck, IconEdit, IconFile, IconGauge, IconImage, IconShield, IconSparkle, IconTrash, IconX, IconZap } from "./Icons";
+import { Select, type SelectOption } from "./Select";
+import { modelChoices, modelLabel, prettyValueName, toggleInfo, toggleLabel } from "../models";
 
 interface PendingImage {
   id: string;
@@ -550,15 +552,42 @@ function QueueRow({ h, sid, q, index }: { h: HostState; sid: string; q: QueueIte
 
 // ------------------------------------------------------------------ config bar
 
-function optLabel(o: ConfigOption) {
-  const cur = o.options?.find((x) => x.value === o.currentValue);
-  return cur?.name ?? String(o.currentValue ?? "—");
+const MODE_TONE: Record<string, "accent" | "warn" | "info" | undefined> = {
+  plan: "info",
+  acceptEdits: "accent",
+  bypassPermissions: "warn",
+  auto: "warn",
+  yolo: "warn",
+  autonomous: "warn",
+};
+
+function categoryIcon(o: ConfigOption) {
+  switch (o.category) {
+    case "mode":
+      return <IconShield size={13} />;
+    case "model":
+      return <IconSparkle size={13} />;
+    case "thought_level":
+      return <IconGauge size={13} />;
+    default:
+      return undefined;
+  }
+}
+
+function choicesFor(o: ConfigOption): SelectOption[] {
+  if (o.category === "model") return modelChoices(o);
+  return (o.options ?? []).map((x) => ({ value: x.value, label: prettyValueName(x.name), description: x.description }));
 }
 
 function ConfigBar({ h, session }: { h: HostState; session: Session }) {
   const [busy, setBusy] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  // Optimistic values while a change is in flight; dropped when the session row catches up.
+  const [pending, setPending] = useState<Record<string, unknown>>({});
   const opts = session.config_options ?? [];
+  const sig = JSON.stringify(opts.map((o) => [o.id, o.currentValue]));
+  useEffect(() => setPending({}), [sig, session.mode]);
+
   const hasModeOpt = opts.some((o) => o.category === "mode");
   // Agents without config options can still expose ACP modes: fall back to POST /mode.
   const modeFallback = !hasModeOpt && session.modes?.length > 0;
@@ -566,66 +595,102 @@ function ConfigBar({ h, session }: { h: HostState; session: Session }) {
 
   const ordered = [...opts].sort((a, b) => rank(a) - rank(b));
 
-  const set = async (id: string, fn: () => Promise<unknown>) => {
+  const set = async (id: string, value: unknown, fn: () => Promise<unknown>) => {
     setBusy(id);
     setErr(null);
+    setPending((p) => ({ ...p, [id]: value }));
     try {
       await fn();
     } catch (e) {
       setErr((e as Error).message);
+      setPending((p) => {
+        const { [id]: _drop, ...rest } = p;
+        void _drop;
+        return rest;
+      });
     } finally {
       setBusy(null);
     }
   };
 
+  const val = (o: ConfigOption) => (o.id in pending ? pending[o.id] : o.currentValue);
+
   return (
-    <div className="configbar">
+    <div className="configbar" role="toolbar" aria-label="Agent settings">
       {modeFallback && (
-        <label className={cx("cfg", busy === "__mode" && "busy")} title="Mode">
-          <span className="cfg-label">Mode</span>
-          <select value={session.mode ?? ""} disabled={busy !== null} onChange={(e) => set("__mode", () => h.api.setMode(session.id, e.target.value))}>
-            {!session.mode && <option value="">—</option>}
-            {session.modes.map((m) => (
-              <option key={m.id} value={m.id} title={m.description}>
-                {m.name}
-              </option>
-            ))}
-          </select>
-        </label>
+        <Select
+          label="Mode"
+          icon={<IconShield size={13} />}
+          value={"__mode" in pending ? pending.__mode : session.mode}
+          options={session.modes.map((m) => ({ value: m.id, label: m.name, description: m.description }))}
+          busy={busy === "__mode"}
+          tone={MODE_TONE[String(session.mode)]}
+          onChange={(v) => set("__mode", v, () => h.api.setMode(session.id, String(v)))}
+        />
       )}
-      {ordered.map((o) =>
-        o.type === "select" && o.options?.length ? (
-          <label key={o.id} className={cx("cfg", busy === o.id && "busy", o.category === "mode" && "cfg-mode")} title={o.description ?? o.name}>
-            <span className="cfg-label">{o.name}</span>
-            <select
-              value={JSON.stringify(o.currentValue)}
-              disabled={busy !== null}
-              onChange={(e) => {
-                const value = JSON.parse(e.target.value);
-                void set(o.id, () => h.api.setConfig(session.id, o.id, value));
+      {ordered.map((o) => {
+        const tog = toggleInfo(o);
+        if (tog) {
+          const on = o.id in pending ? pending[o.id] === tog.onValue : tog.on;
+          return (
+            <button
+              key={o.id}
+              type="button"
+              role="switch"
+              aria-checked={on}
+              className={cx("cfg-toggle", on && "on", busy === o.id && "busy")}
+              title={`${o.name}: ${on ? "on" : "off"}${o.description ? ` — ${o.description}` : ""}`}
+              disabled={busy === o.id}
+              onClick={() => {
+                const next = on ? tog.offValue : tog.onValue;
+                void set(o.id, next, () => h.api.setConfig(session.id, o.id, next));
               }}
             >
-              {!o.options.some((x) => x.value === o.currentValue) && <option value={JSON.stringify(o.currentValue)}>{String(o.currentValue)}</option>}
-              {o.options.map((x) => (
-                <option key={JSON.stringify(x.value)} value={JSON.stringify(x.value)} title={x.description}>
-                  {x.name}
-                </option>
-              ))}
-            </select>
-          </label>
-        ) : (
-          <span key={o.id} className="cfg readonly" title={o.description ?? o.name}>
-            <span className="cfg-label">{o.name}</span>
-            <span>{optLabel(o)}</span>
+              {/fast|turbo|speed/i.test(o.id + o.name) ? <IconZap size={12} /> : <span className="cfg-toggle-dot" />}
+              <span>{toggleLabel(o)}</span>
+            </button>
+          );
+        }
+        if (o.type === "select" && o.options?.length) {
+          const v = val(o);
+          return (
+            <Select
+              key={o.id}
+              label={o.name}
+              icon={categoryIcon(o)}
+              value={v}
+              display={o.category === "model" ? modelLabel(o, v) : undefined}
+              options={choicesFor(o)}
+              busy={busy === o.id}
+              tone={o.category === "mode" ? MODE_TONE[String(v)] : undefined}
+              searchPlaceholder={o.category === "model" ? "Search models…" : undefined}
+              onChange={(nv) => set(o.id, nv, () => h.api.setConfig(session.id, o.id, nv))}
+            />
+          );
+        }
+        return (
+          <span key={o.id} className="sel-chip readonly" title={o.description ?? o.name}>
+            <span className="sel-label">{o.name}</span>
+            <span className="sel-value">{optLabel(o)}</span>
           </span>
-        ),
+        );
+      })}
+      {err && (
+        <span className="cfg-err" title={err}>
+          {err}
+        </span>
       )}
-      {err && <span className="cfg-err">{err}</span>}
     </div>
   );
 }
 
+function optLabel(o: ConfigOption) {
+  const cur = o.options?.find((x) => x.value === o.currentValue);
+  return cur?.name ?? String(o.currentValue ?? "—");
+}
+
 const RANK: Record<string, number> = { mode: 0, model: 1, thought_level: 2 };
 function rank(o: ConfigOption) {
-  return RANK[o.category ?? ""] ?? 5;
+  const r = RANK[o.category ?? ""] ?? 5;
+  return toggleInfo(o) ? r + 10 : r;
 }

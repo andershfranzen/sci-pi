@@ -17,7 +17,8 @@ export interface SessionMode {
 
 export interface Usage {
   used: number;
-  size: number;
+  /** context window; missing/null when the model's window is unknown */
+  size?: number | null;
   cost?: { amount: number; currency: string };
 }
 

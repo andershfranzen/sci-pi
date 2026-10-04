@@ -5,9 +5,18 @@ import type { FsList } from "../types";
 import { navigate, sessionHash } from "../router";
 import { cx, tildify } from "../util";
 import { Modal } from "./Modal";
+import { Select } from "./Select";
 import { IconChevron, IconFolder, IconGit } from "./Icons";
 
 const LAST_KEY = "sci-pi.lastNew";
+
+const AGENT_DESC: Record<string, string> = {
+  "sci-pi": "Built-in harness · any model via CLIProxyAPI",
+  claude: "Anthropic's Claude Code over ACP",
+  codex: "OpenAI Codex over ACP",
+  opencode: "OpenCode over ACP",
+  omp: "oh-my-pi over ACP",
+};
 
 interface Last {
   agent?: string;
@@ -87,27 +96,31 @@ export function NewSessionDialog({ initialHost, onClose }: { initialHost: HostSt
       >
         <div className="form-row two">
           {store.mode === "hub" && hosts.length > 1 && (
-            <label className="field">
+            <div className="field">
               <span className="label">Host</span>
-              <select value={hostKey} onChange={(e) => setHostKey(e.target.value)}>
-                {hosts.map((x) => (
-                  <option key={x.key} value={x.key}>
-                    {x.name}
-                  </option>
-                ))}
-              </select>
-            </label>
+              <Select
+                variant="field"
+                label="Host"
+                value={hostKey}
+                onChange={(v) => setHostKey(String(v))}
+                options={hosts.map((x) => ({
+                  value: x.key,
+                  label: x.name,
+                  description: x.hub ? `${x.hub.transport}${x.hub.discovered ? " · discovered" : ""}` : undefined,
+                }))}
+              />
+            </div>
           )}
-          <label className="field">
+          <div className="field">
             <span className="label">Agent</span>
-            <select value={agent} onChange={(e) => setAgent(e.target.value)}>
-              {agents.map((a) => (
-                <option key={a.id} value={a.id}>
-                  {a.name}
-                </option>
-              ))}
-            </select>
-          </label>
+            <Select
+              variant="field"
+              label="Agent"
+              value={agent}
+              onChange={(v) => setAgent(String(v))}
+              options={agents.map((a) => ({ value: a.id, label: a.name, description: AGENT_DESC[a.id] }))}
+            />
+          </div>
           <label className="field">
             <span className="label">
               Mode <span className="dim">optional</span>

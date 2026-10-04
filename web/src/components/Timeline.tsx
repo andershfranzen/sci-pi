@@ -9,6 +9,7 @@ import { Markdown } from "./Markdown";
 import { PermissionCard, PlanCard, ToolCard } from "./ToolCard";
 import { IconBrain, IconChevron, IconDiff, IconExternal, IconFile, IconFork, IconUndo } from "./Icons";
 import { Modal } from "./Modal";
+import { Select } from "./Select";
 import { DiffFiles, DiffTotals, useDiff } from "./DiffView";
 
 function Attachments({ h, list }: { h: HostState; list: Attachment[] }) {
@@ -247,17 +248,16 @@ function ForkDialog({ h, session, turn, onClose }: { h: HostState; session: Sess
       <p className="modal-text">
         Starts a new session with the files from the end of turn {turn} in a fresh worktree, and hands the conversation so far to the agent you pick.
       </p>
-      <label className="field">
+      <div className="field">
         <span className="label">Agent</span>
-        <select value={agent} onChange={(e) => setAgent(e.target.value)}>
-          {agents.map((a) => (
-            <option key={a.id} value={a.id}>
-              {a.name}
-              {a.id === session.agent ? " (same)" : ""}
-            </option>
-          ))}
-        </select>
-      </label>
+        <Select
+          variant="field"
+          label="Agent"
+          value={agent}
+          onChange={(v) => setAgent(String(v))}
+          options={agents.map((a) => ({ value: a.id, label: a.name, meta: a.id === session.agent ? "current" : undefined }))}
+        />
+      </div>
       {err && <div className="form-error">{err}</div>}
       <div className="modal-actions">
         <button className="btn btn-ghost" onClick={onClose}>

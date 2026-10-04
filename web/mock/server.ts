@@ -321,6 +321,87 @@ function claudeConfig(mode = "default", model = "opus", effort = "high") {
   ];
 }
 
+// sci-pi's own harness: models come from CLIProxyAPI (plus a few direct ones). Effort and fast
+// options only exist when the selected model supports them, like the real daemon.
+interface MockModel {
+  id: string;
+  name: string;
+  ctx: string;
+  reasoning?: boolean;
+  fast?: boolean;
+}
+const SCIPI_MODELS: MockModel[] = [
+  { id: "claude-opus-5-5", name: "Claude Opus 5.5", ctx: "1M", reasoning: true, fast: true },
+  { id: "claude-sonnet-5-5", name: "Claude Sonnet 5.5", ctx: "1M", reasoning: true },
+  { id: "claude-haiku-4-5", name: "Claude Haiku 4.5", ctx: "200K" },
+  ...[
+    ["claude-opus-5-5", "1M", true, true],
+    ["claude-fable-5-1", "1M", true, false],
+    ["claude-sonnet-5-5", "1M", true, false],
+    ["claude-opus-4-8", "200K", true, false],
+    ["claude-opus-4-5-20251101", "200K", true, false],
+    ["claude-sonnet-4-5-20250929", "200K", true, false],
+    ["claude-haiku-4-5-20251001", "200K", false, false],
+    ["claude-3-7-sonnet-20250219", "200K", false, false],
+    ["gpt-6.1-sol", "400K", true, true],
+    ["gpt-6-sol", "400K", true, true],
+    ["gpt-6-luna", "400K", true, false],
+    ["gpt-6-astra", "272K", true, false],
+    ["gpt-5.6-sol", "272K", true, true],
+    ["gpt-5.6-terra", "272K", true, false],
+    ["gpt-5.6-luna", "272K", true, false],
+    ["gpt-5.5", "272K", true, false],
+    ["codex-auto-review", "272K", true, false],
+    ["gpt-image-2.5", "32K", false, false],
+    ["gpt-image-2.5-flare", "32K", false, false],
+    ["gemini-3-pro", "2M", true, false],
+    ["gemini-3-flash", "1M", false, true],
+  ].map(([id, ctx, reasoning, fast]) => ({ id: `cliproxy/${id}`, name: `${id} (cliproxy)`, ctx: String(ctx), reasoning: !!reasoning, fast: !!fast })),
+  { id: "mock/echo", name: "Echo", ctx: "8K" },
+  { id: "mock/slow-thinker", name: "Slow thinker", ctx: "32K", reasoning: true },
+];
+
+function modelDesc(m: MockModel) {
+  return [`${m.ctx} context`, m.reasoning && "reasoning", m.fast && "fast mode"].filter(Boolean).join(" · ");
+}
+
+function scipiConfig(model = "cliproxy/gpt-6.1-sol", mode = "default", effort = "high", fast = false): any[] {
+  const m = SCIPI_MODELS.find((x) => x.id === model) ?? SCIPI_MODELS[0];
+  const out: any[] = [
+    {
+      id: "mode",
+      name: "Mode",
+      category: "mode",
+      type: "select",
+      currentValue: mode,
+      options: [
+        { value: "default", name: "Ask", description: "Ask before editing files or running commands" },
+        { value: "acceptEdits", name: "Accept edits", description: "Edit freely, ask before running commands" },
+        { value: "plan", name: "Plan", description: "Read-only: investigate and propose a plan" },
+        { value: "bypassPermissions", name: "Autonomous", description: "Never ask" },
+      ],
+    },
+    { id: "model", name: "Model", category: "model", type: "select", currentValue: m.id, options: SCIPI_MODELS.map((x) => ({ value: x.id, name: x.name, description: modelDesc(x) })) },
+  ];
+  if (m.reasoning)
+    out.push({
+      id: "effort",
+      name: "Effort",
+      category: "thought_level",
+      type: "select",
+      currentValue: effort,
+      options: [
+        { value: "low", name: "low", description: "Fastest, least thinking" },
+        { value: "medium", name: "medium" },
+        { value: "high", name: "high", description: "Default" },
+        { value: "xhigh", name: "xhigh", description: "Thinks longer on hard problems" },
+        { value: "max", name: "max", description: "Maximum reasoning budget" },
+      ],
+    });
+  if (m.fast) out.push({ id: "fast", name: "Fast", category: "model_config", type: "boolean", currentValue: fast, description: "Priority processing at higher cost" });
+  return out;
+}
+
 function codexConfig() {
   return [
     { id: "model", name: "Model", category: "model", type: "select", currentValue: "gpt-5.5-codex", options: [{ value: "gpt-5.5-codex", name: "gpt-5.5-codex" }, { value: "gpt-5.5", name: "gpt-5.5" }] },
@@ -401,14 +482,14 @@ async function seed() {
     {
       id: A,
       title: "Refactor auth middleware to verify JWTs with jose",
-      agent: "claude",
+      agent: "sci-pi",
       project: `${HOME}/code/webapp`,
       cwd: `${HOME}/.sci-pi/worktrees/webapp-3f2a9c1b`,
       branch: "sci-pi/3f2a9c1b",
       base_commit: "9c1e4b7d2a5f8e3b6c0d1a2f4e5b6c7d8e9f0a1b",
       mode: "default",
-      modes: MODES,
-      config_options: claudeConfig(),
+      modes: [],
+      config_options: scipiConfig("cliproxy/gpt-6.1-sol", "default", "high", true),
       commands: CLAUDE_COMMANDS,
       pinned: true,
       usage: { used: 48_210, size: 200_000, cost: { amount: 0.42, currency: "USD" } },
@@ -536,7 +617,7 @@ async function seed() {
       cwd: `${HOME}/.sci-pi/worktrees/sci-pi-a81c07e2`,
       branch: "sci-pi/a81c07e2",
       base_commit: "1f2e3d4c5b6a79880716253443526170",
-      usage: { used: 121_400, size: 272_000 },
+      usage: { used: 121_400 } as any,
       config_options: codexConfig(),
     },
     t,
@@ -775,7 +856,7 @@ async function liveLoop(B: string) {
     await stream(B, `Switched the bucket to \`Instant\` (pass ${n}). Now wiring the layer into the router and returning \`429 Too Many Requests\` with a \`Retry-After\` header. `, `b_msg_${n}`, 120);
     await sleep(2500);
     if (cancelled.has(B) || sessions.get(B)?.status !== "running") continue;
-    touch(B, { usage: { used: Math.min(272_000, (s.usage?.used ?? 0) + 3_100), size: 272_000 } });
+    touch(B, { usage: { used: (s.usage?.used ?? 0) + 3_100 } as any });
     await sleep(4000);
   }
 }
@@ -915,6 +996,7 @@ function info(viaTailnet: boolean) {
     version: "0.1.0-mock",
     home: HOME,
     agents: [
+      { id: "sci-pi", name: "sci-pi" },
       { id: "claude", name: "Claude Code" },
       { id: "codex", name: "Codex" },
       { id: "opencode", name: "OpenCode" },
@@ -1057,7 +1139,7 @@ async function api(req: Request, url: URL): Promise<Response> {
         status: "starting",
         mode: b.mode || "default",
         modes: MODES,
-        config_options: b.agent === "claude" ? claudeConfig(b.mode || "default") : b.agent === "codex" ? codexConfig() : [],
+        config_options: b.agent === "sci-pi" ? scipiConfig(undefined, b.mode || "default") : b.agent === "claude" ? claudeConfig(b.mode || "default") : b.agent === "codex" ? codexConfig() : [],
         commands: b.agent === "claude" ? CLAUDE_COMMANDS : [],
         usage: { used: 0, size: 200_000 },
       },
@@ -1167,8 +1249,14 @@ async function api(req: Request, url: URL): Promise<Response> {
     const opt = s.config_options.find((o) => o.id === config_id);
     if (!opt) return err(400, "unknown config option");
     if (opt.options && !opt.options.some((o: any) => o.value === value)) return err(400, "invalid value");
+    if (opt.type === "boolean" && typeof value !== "boolean") return err(400, "expected a boolean");
     await sleep(250);
     opt.currentValue = value;
+    if (s.agent === "sci-pi" && opt.id === "model") {
+      // Capabilities follow the model: effort / fast appear or disappear.
+      const cur = (id: string) => s.config_options.find((o) => o.id === id)?.currentValue;
+      s.config_options = scipiConfig(value, cur("mode"), cur("effort") ?? "high", cur("fast") ?? false);
+    }
     if (opt.category === "mode") {
       upd(sid, { sessionUpdate: "current_mode_update", currentModeId: value });
       touch(sid, { mode: value, config_options: s.config_options });
@@ -1202,7 +1290,7 @@ async function api(req: Request, url: URL): Promise<Response> {
         status: "idle",
         modes: agent === "claude" ? MODES : [],
         mode: agent === "claude" ? "default" : null,
-        config_options: agent === "claude" ? claudeConfig() : agent === "codex" ? codexConfig() : [],
+        config_options: agent === "sci-pi" ? scipiConfig() : agent === "claude" ? claudeConfig() : agent === "codex" ? codexConfig() : [],
         commands: agent === "claude" ? CLAUDE_COMMANDS : [],
         usage: { used: 0, size: 200_000 },
       },

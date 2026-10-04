@@ -277,6 +277,25 @@ export const IconDiff = (p: P) => (
   </I>
 );
 
+export const IconSparkle = (p: P) => (
+  <I {...p}>
+    <path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8z" />
+    <path d="M19 15l.8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8z" />
+  </I>
+);
+export const IconGauge = (p: P) => (
+  <I {...p}>
+    <path d="M4 18a8 8 0 1 1 16 0" />
+    <path d="m12 14 4-5" />
+  </I>
+);
+export const IconBot = (p: P) => (
+  <I {...p}>
+    <rect x="4" y="8" width="16" height="12" rx="3" />
+    <path d="M12 4v4M9 13h.01M15 13h.01M9.5 17h5" />
+  </I>
+);
+
 export function ToolKindIcon({ kind, size = 14 }: { kind?: string; size?: number }) {
   switch (kind) {
     case "read":

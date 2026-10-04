@@ -209,17 +209,21 @@ function StopButton({ h, session }: { h: HostState; session: Session }) {
 
 function UsageMeter({ session }: { session: Session }) {
   const u = session.usage;
-  if (!u) return null;
-  const pct = u.size ? Math.min(100, (u.used / u.size) * 100) : 0;
+  if (!u || !Number.isFinite(u.used)) return null;
+  const size = typeof u.size === "number" && u.size > 0 ? u.size : null;
+  const pct = size ? Math.min(100, (u.used / size) * 100) : null;
   return (
-    <span className="usage" title={`${u.used.toLocaleString()} / ${u.size.toLocaleString()} tokens`}>
-      <span className={cx("usage-bar", pct > 85 && "hot")}>
-        <span style={{ width: `${pct}%` }} />
-      </span>
+    <span className="usage" title={size ? `${u.used.toLocaleString()} / ${size.toLocaleString()} tokens` : `${u.used.toLocaleString()} tokens (context window unknown)`}>
+      {pct !== null && (
+        <span className={cx("usage-bar", pct > 85 && "hot")}>
+          <span style={{ width: `${pct}%` }} />
+        </span>
+      )}
       <span className="mono">
-        {fmtTokens(u.used)}/{fmtTokens(u.size)}
+        {fmtTokens(u.used)}
+        {size ? `/${fmtTokens(size)}` : " tokens"}
       </span>
-      {u.cost && <span className="mono dim">{fmtCost(u.cost)}</span>}
+      {u.cost && Number.isFinite(u.cost.amount) && <span className="mono dim">{fmtCost(u.cost)}</span>}
     </span>
   );
 }
