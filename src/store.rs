@@ -107,6 +107,19 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    pub fn turn_event(&self, session_id: &str, kind: &str, turn: u32) -> Result<Option<Event>> {
+        let conn = self.conn.lock().unwrap();
+        Ok(conn
+            .query_row(
+                "SELECT id, session_id, ts, kind, data FROM events
+                 WHERE session_id = ?1 AND kind = ?2 AND json_extract(data, '$.turn') = ?3
+                 ORDER BY id DESC LIMIT 1",
+                params![session_id, kind, turn],
+                row_to_event,
+            )
+            .optional()?)
+    }
+
     /// The most recent agent message text in a session, for notifications.
     pub fn last_agent_text(&self, session_id: &str) -> Result<Option<String>> {
         let conn = self.conn.lock().unwrap();

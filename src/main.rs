@@ -8,6 +8,7 @@ mod server;
 mod session;
 mod store;
 mod tailscale;
+mod terminal;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};

@@ -68,6 +68,7 @@ fn default_agents() -> BTreeMap<String, AgentSpec> {
         ("claude".into(), agent("Claude Code", &["npx", "-y", "@agentclientprotocol/claude-agent-acp"])),
         ("codex".into(), agent("Codex", &["npx", "-y", "@zed-industries/codex-acp"])),
         ("opencode".into(), agent("OpenCode", &["opencode", "acp"])),
+        ("omp".into(), agent("oh-my-pi", &["omp", "acp"])),
     ])
 }
 

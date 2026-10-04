@@ -38,8 +38,28 @@ pub struct Session {
     #[serde(default)]
     pub modes: Vec<Mode>,
     pub usage: Option<Value>,
+    /// Prompts waiting for the current turn to end. Persisted, so a queue survives restarts.
+    #[serde(default)]
+    pub queue: Vec<QueuedPrompt>,
     #[serde(default)]
     pub queued: usize,
+    /// ACP `SessionConfigOption`s verbatim (model, effort, mode, …).
+    #[serde(default)]
+    pub config_options: Vec<Value>,
+    /// The agent's slash commands: `{ name, description, input? }`.
+    #[serde(default)]
+    pub commands: Vec<Value>,
+    /// ACP `promptCapabilities` (`image`, `embeddedContext`, …).
+    #[serde(default)]
+    pub prompt_caps: Value,
+    #[serde(default)]
+    pub turns: u32,
+    #[serde(default)]
+    pub pinned: bool,
+    #[serde(default)]
+    pub archived: bool,
+    #[serde(default)]
+    pub pr_url: Option<String>,
     #[serde(default)]
     pub pending_permissions: usize,
     pub created_at: i64,
@@ -52,6 +72,27 @@ pub struct Session {
     /// Set once the user (or the first prompt) picked a title, so agent title updates don't clobber it.
     #[serde(default)]
     pub title_locked: bool,
+    /// Prepended (invisibly) to the next prompt, e.g. after the user reverted files.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_note: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueuedPrompt {
+    pub id: String,
+    pub text: String,
+    #[serde(default)]
+    pub attachments: Vec<Attachment>,
+}
+
+/// Something attached to a prompt. Images are stored on the daemon at upload time.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum Attachment {
+    /// `name` is the file under `/api/attachments/`.
+    Image { name: String, mime_type: String },
+    /// A path in the project (from an @-mention).
+    File { path: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
