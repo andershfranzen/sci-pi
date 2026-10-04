@@ -50,6 +50,13 @@ pub struct NativeConfig {
     pub model: String,
     #[serde(default = "default_effort")]
     pub effort: String,
+    /// Model for subagents (default: the session's model).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subagent_model: Option<String>,
+    /// Compact the conversation once a request's context passes this many tokens
+    /// (default 300k, never above 80% of the model's window).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compact_at_tokens: Option<u64>,
     /// OpenAI-compatible endpoints (OpenAI, OpenRouter, llama.cpp, vLLM, Ollama, …).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub providers: BTreeMap<String, ProviderConfig>,
@@ -83,7 +90,13 @@ pub struct ProviderConfig {
 
 impl Default for NativeConfig {
     fn default() -> Self {
-        NativeConfig { model: default_model(), effort: default_effort(), providers: BTreeMap::new() }
+        NativeConfig {
+            model: default_model(),
+            effort: default_effort(),
+            subagent_model: None,
+            compact_at_tokens: None,
+            providers: BTreeMap::new(),
+        }
     }
 }
 

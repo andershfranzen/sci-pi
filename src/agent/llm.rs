@@ -26,6 +26,7 @@ pub enum Delta {
     ToolStart { id: String, name: String },
 }
 
+#[derive(Clone, Copy)]
 pub struct Request<'a> {
     pub model: &'a str,
     pub system: &'a str,
@@ -186,23 +187,15 @@ async fn anthropic(
     if fallbacks {
         body["fallbacks"] = json!("default");
     }
+    let mut betas = vec![];
+    if fallbacks {
+        betas.push("server-side-fallback-2026-07-01");
+    }
+    if carries_compaction(req.messages) {
+        betas.push(COMPACTION_BETA);
+    }
     let url = format!("{}/v1/messages", base_url.trim_end_matches('/'));
-    let res = post_with_retry(|| {
-        let mut b = http
-            .post(&url)
-            .header("x-api-key", api_key)
-            .header("anthropic-version", "2023-06-01")
-            .header("content-type", "application/json")
-            .json(&body);
-        if fallbacks {
-            b = b.header("anthropic-beta", "server-side-fallback-2026-07-01");
-        }
-        if proxy {
-            b = b.bearer_auth(api_key);
-        }
-        b
-    })
-    .await?;
+    let res = post_with_retry(|| anthropic_request(http, &url, api_key, proxy, &betas).json(&body)).await?;
 
     let mut blocks: Vec<Value> = vec![];
     let mut partial: HashMap<usize, String> = HashMap::new();
@@ -286,6 +279,122 @@ async fn anthropic(
     }
     blocks.retain(|b| !b.is_null());
     Ok(Response { content: blocks, stop_reason, usage, invalid_inputs: invalid })
+}
+
+const COMPACTION_BETA: &str = "compact-2026-09-04";
+
+/// Models that support on-demand server-side compaction.
+const SERVER_COMPACTION: &[&str] = &[
+    "claude-fable-5-1", "claude-mythos-5-1", "claude-fable-5", "claude-mythos-5", "claude-opus-5-5", "claude-opus-5",
+    "claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6", "claude-sonnet-5-5", "claude-sonnet-5", "claude-sonnet-4-6",
+];
+
+fn carries_compaction(messages: &[Value]) -> bool {
+    messages.iter().any(|m| m["content"].as_array().is_some_and(|c| c.iter().any(|b| b["type"] == "compaction")))
+}
+
+fn anthropic_request(http: &reqwest::Client, url: &str, api_key: &str, proxy: bool, betas: &[&str]) -> reqwest::RequestBuilder {
+    let mut b = http
+        .post(url)
+        .header("x-api-key", api_key)
+        .header("anthropic-version", "2023-06-01")
+        .header("content-type", "application/json");
+    if !betas.is_empty() {
+        b = b.header("anthropic-beta", betas.join(","));
+    }
+    if proxy {
+        b = b.bearer_auth(api_key);
+    }
+    b
+}
+
+pub const SUMMARY_INSTRUCTIONS: &str = "Summarize this conversation so that a fresh instance of the agent can continue the work \
+without it. Keep: the user's goals, constraints and preferences; decisions made and why; every file examined or changed \
+(exact paths) and what changed; commands that matter and their results, including exact error messages; the current state \
+of the task; open problems; and the immediate next step. Be specific and complete, not brief. Do not call any tools; \
+respond with the summary text only.";
+
+/// A compacted replacement for the whole history, plus the usage it cost.
+pub struct Compacted {
+    pub history: Vec<Value>,
+    pub summary: String,
+    pub usage: Value,
+}
+
+impl Provider {
+    /// Summarizes the conversation into a replacement history. Anthropic models that support it
+    /// use on-demand server compaction (a signed block, prompt cache and thinking stay valid);
+    /// everything else gets client-side "simple compaction": the model writes a summary that
+    /// replaces the history, with no earlier turns or thinking replayed.
+    pub async fn compact(&self, http: &reqwest::Client, req: &Request<'_>) -> Result<Compacted> {
+        if let Provider::Anthropic { api_key, base_url, proxy: false } = self {
+            if SERVER_COMPACTION.contains(&req.model) {
+                return server_compaction(http, api_key, base_url, req).await;
+            }
+        }
+        let mut messages = req.messages.to_vec();
+        let ask = json!({ "type": "text", "text": SUMMARY_INSTRUCTIONS });
+        match messages.last_mut() {
+            Some(last) if last["role"] == "user" => match &mut last["content"] {
+                Value::Array(a) => a.push(ask),
+                other => *other = json!([{ "type": "text", "text": other.as_str().unwrap_or_default() }, ask]),
+            },
+            _ => messages.push(json!({ "role": "user", "content": [ask] })),
+        }
+        let res = self.stream(http, &Request { messages: &messages, ..*req }, &mut |_| {}).await?;
+        let summary: String = res.content.iter().filter(|b| b["type"] == "text").filter_map(|b| b["text"].as_str()).collect();
+        if summary.trim().is_empty() {
+            bail!("the model returned no summary (stop reason: {})", res.stop_reason);
+        }
+        let history = vec![json!({ "role": "user", "content": [{ "type": "text",
+            "text": format!("<conversation-summary>\n{}\n</conversation-summary>", summary.trim()) }] })];
+        Ok(Compacted { history, summary, usage: res.usage })
+    }
+}
+
+async fn server_compaction(http: &reqwest::Client, api_key: &str, base_url: &str, req: &Request<'_>) -> Result<Compacted> {
+    let (thinking, effort, _) = anthropic_model_opts(req.model);
+    // Same system and tools as the conversation's requests.
+    let tools: Vec<Value> = req
+        .tools
+        .iter()
+        .map(|t| {
+            let mut t = t.clone();
+            t["eager_input_streaming"] = json!(true);
+            t
+        })
+        .collect();
+    let mut body = json!({
+        "model": req.model,
+        "max_tokens": 32000,
+        "system": [{ "type": "text", "text": req.system }],
+        "messages": req.messages,
+        "tools": tools,
+        "compaction": { "type": "summarize", "instructions": SUMMARY_INSTRUCTIONS },
+    });
+    if let Some(t) = thinking {
+        body["thinking"] = t;
+    }
+    if effort {
+        body["output_config"] = json!({ "effort": req.effort });
+    }
+    let url = format!("{}/v1/messages", base_url.trim_end_matches('/'));
+    let res = post_with_retry(|| anthropic_request(http, &url, api_key, false, &[COMPACTION_BETA]).json(&body)).await?;
+    let v: Value = res.json().await?;
+    if v["stop_reason"] != "compaction" {
+        bail!("no summary came back (stop reason: {})", v["stop_reason"].as_str().unwrap_or("?"));
+    }
+    let block = v["content"].get(0).cloned().ok_or_else(|| anyhow!("compaction response had no block"))?;
+    let summary = block["content"].as_str().unwrap_or_default().to_string();
+    // Billing is reported per iteration; the top-level counts are zero.
+    let mut usage = json!({ "input_tokens": 0, "output_tokens": 0 });
+    for it in v["usage"]["iterations"].as_array().into_iter().flatten() {
+        for k in ["input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"] {
+            let add = it[k].as_u64().unwrap_or(0);
+            usage[k] = json!(usage[k].as_u64().unwrap_or(0) + add);
+        }
+    }
+    Ok(Compacted { history: vec![json!({ "role": "assistant", "content": [block] })], summary, usage })
 }
 
 fn append(block: &mut Value, field: &str, s: &str) {
