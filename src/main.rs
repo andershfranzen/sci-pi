@@ -1,0 +1,115 @@
+mod acp;
+mod config;
+mod git;
+mod hub;
+mod model;
+mod remote;
+mod server;
+mod session;
+mod store;
+mod tailscale;
+
+use anyhow::Result;
+use clap::{Parser, Subcommand};
+
+/// Remote-first coding agents: run them on your machines, drive them from anywhere.
+#[derive(Parser)]
+#[command(version)]
+struct Cli {
+    #[command(subcommand)]
+    cmd: Cmd,
+}
+
+#[derive(Subcommand)]
+enum Cmd {
+    /// Run the daemon (normally via the systemd user unit `outpost add` installs).
+    Serve,
+    /// Open the multi-host UI on this machine.
+    Ui {
+        #[arg(long, default_value_t = config::HUB_PORT)]
+        port: u16,
+        /// Don't open a browser.
+        #[arg(long)]
+        no_open: bool,
+    },
+    /// Install outpost on a machine over SSH and remember it.
+    Add {
+        /// SSH destination: an alias from ~/.ssh/config or user@host.
+        target: String,
+        /// Name shown in the UI (defaults to the host part of the target).
+        #[arg(long)]
+        name: Option<String>,
+    },
+    /// List remembered hosts.
+    Hosts,
+    /// Print this machine's daemon token.
+    Token,
+    /// Check agents, Tailscale and config on this machine.
+    Doctor,
+    #[command(hide = true)]
+    LocalInfo,
+    #[command(hide = true)]
+    TailscaleAllow { login: String },
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "outpost=info".into()),
+        )
+        .init();
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
+    match Cli::parse().cmd {
+        Cmd::Serve => server::serve().await,
+        Cmd::Ui { port, no_open } => hub::run(port, !no_open).await,
+        Cmd::Add { target, name } => remote::add(&target, name).await,
+        Cmd::Hosts => {
+            for (name, h) in config::Hosts::load()?.hosts {
+                let via = h.tailnet_url.as_deref().unwrap_or("ssh tunnel");
+                println!("{name:16} ssh={:24} {via}", h.ssh);
+            }
+            Ok(())
+        }
+        Cmd::Token => {
+            println!("{}", config::token()?);
+            Ok(())
+        }
+        Cmd::Doctor => doctor().await,
+        Cmd::LocalInfo => remote::local_info().await,
+        Cmd::TailscaleAllow { login } => remote::tailscale_allow(&login),
+    }
+}
+
+async fn doctor() -> Result<()> {
+    let cfg = config::Config::load_or_init()?;
+    println!("config:  {}", config::config_dir().join("config.toml").display());
+    println!("data:    {}", config::data_dir().display());
+    println!("agents:");
+    for (id, a) in &cfg.agents {
+        let found = which(&a.command[0]);
+        let mark = if found.is_some() { "✓" } else { "✗" };
+        println!("  {mark} {id:10} {}  ({})", a.command.join(" "), found.unwrap_or_else(|| "not on PATH".into()));
+    }
+    match tailscale::self_node().await {
+        Some(n) => {
+            println!("tailscale: {} {:?}", n.dns_name, n.ips);
+            println!("  owner: {}", n.owner.as_deref().unwrap_or("(tagged node)"));
+            let allow = if cfg.tailscale.allow.is_empty() { n.owner.clone().into_iter().collect() } else { cfg.tailscale.allow.clone() };
+            println!("  token-free access for: {}", if allow.is_empty() { "nobody (set tailscale.allow)".into() } else { allow.join(", ") });
+            match tailscale::cert_pair(&n.dns_name).await {
+                Ok(_) => println!("  https: ✓ cert available"),
+                Err(e) => println!("  https: ✗ {e:#}  (fix: sudo tailscale set --operator=$USER)"),
+            }
+        }
+        None => println!("tailscale: not running (SSH tunnels only)"),
+    }
+    println!("ntfy:    {}", cfg.ntfy_url.as_deref().unwrap_or("not configured"));
+    Ok(())
+}
+
+fn which(cmd: &str) -> Option<String> {
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path).map(|d| d.join(cmd)).find(|p| p.is_file()).map(|p| p.display().to_string())
+}
