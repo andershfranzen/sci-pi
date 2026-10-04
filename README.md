@@ -43,7 +43,7 @@ keep working, and approvals and results wait for you.
 - **Automatic compaction:** past `native.compact_at_tokens`, or a configurable fraction of
   the known context window (default 80%), the conversation is summarized. Server compaction
   is used only when reported by the provider; otherwise the model writes the summary.
-  Unknown windows have no automatic token threshold. `/compact` does it on demand.
+  Unknown windows rely on overflow recovery. `/compact` does it on demand.
 - **Modes:** ask, accept edits, plan (read-only), autonomous – approvals show the diff and can
   be answered from any device.
 - **Durable:** history is saved after every step; a restarted agent resumes the session and
@@ -106,7 +106,8 @@ Keys come from `<PROVIDER>_API_KEY` env vars or `sci-pi auth set <provider>`.
 The model picker includes provider descriptions and runtime context/output limits.
 Effort and Fast controls appear only when reported for the selected model; changing models
 selects that model's effort default and resets Fast. Explicit `native.context_windows`
-overrides are supported. Optional-field rejections are remembered
+overrides are supported, but a smaller provider-reported overflow limit always wins and
+survives restarts in `data/agent/learned-windows.json`. Optional-field rejections are remembered
 per endpoint and model for the running agent. Anthropic requests require a known output
 limit; missing metadata produces an error rather than a guessed token cap.
 

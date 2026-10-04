@@ -562,6 +562,7 @@ impl Server {
         token: &CancellationToken,
     ) -> Result<&'static str> {
         let mut context = if matches!(sink, Sink::Main) { s.settings.lock().context_tokens } else { 0 };
+        let mut overflowed = false;
         for _ in 0..MAX_STEPS {
             let settings = s.settings.lock().clone();
             let model = sink.model().unwrap_or(&settings.model).to_string();
@@ -597,7 +598,27 @@ impl Server {
                 r = provider.stream(&self.http, &req, &mut on) => r,
                 _ = token.cancelled() => return Ok("cancelled"),
             };
-            let resp = resp?;
+            let resp = match resp {
+                Ok(r) => r,
+                // The provider's real window is smaller than we thought: remember it, make room, retry once.
+                Err(e) => match llm::overflow(&format!("{e:#}")) {
+                    Some(limit) if !overflowed => {
+                        overflowed = true;
+                        if let Some(limit) = limit.filter(|limit| *limit > 0) {
+                            let mut learned = self.learned.lock();
+                            learned.entry(model.clone()).and_modify(|known| *known = (*known).min(limit)).or_insert(limit);
+                            models::save_learned(&self.dir.join("learned-windows.json"), &learned);
+                        }
+                        if !self.compact(s, history, system, tool_defs, &model, sink, true).await {
+                            shrink_old_tool_results(history);
+                            self.compact(s, history, system, tool_defs, &model, sink, true).await;
+                        }
+                        context = 0;
+                        continue;
+                    }
+                    _ => return Err(e),
+                },
+            };
             context = self.report_usage(s, &model, &resp.usage, sink);
             if !resp.content.is_empty() {
                 history.push(json!({ "role": "assistant", "content": resp.content }));
@@ -954,7 +975,22 @@ fn concurrent(call: &Value) -> bool {
     tools::read_only(name)
 }
 
-
+/// Last resort when even the summarizer can't fit the history: clip large tool outputs in all
+/// but the latest exchange so a compaction request fits.
+fn shrink_old_tool_results(history: &mut [Value]) {
+    let keep_from = history.len().saturating_sub(2);
+    for msg in &mut history[..keep_from] {
+        for block in msg["content"].as_array_mut().into_iter().flatten() {
+            if block["type"] != "tool_result" {
+                continue;
+            }
+            if let Some(text) = block["content"].as_str().filter(|t| t.len() > 2_000) {
+                let head: String = text.chars().take(1_000).collect();
+                block["content"] = json!(format!("{head}\n… [output removed to make room in the context window]"));
+            }
+        }
+    }
+}
 
 fn prompt_text(prompt: &[Value]) -> String {
     prompt.iter().filter(|b| b["type"] == "text").filter_map(|b| b["text"].as_str()).collect()

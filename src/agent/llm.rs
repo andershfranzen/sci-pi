@@ -688,13 +688,32 @@ pub async fn list_models(http: &reqwest::Client, models_url: &str, api_key: Opti
 }
 
 
-
+/// If an error says the request didn't fit the context window: `Some(the limit, if stated)`.
+pub fn overflow(err: &str) -> Option<Option<u64>> {
+    let e = err.to_lowercase();
+    let hit = ["context length", "context_length", "maximum context", "context window", "prompt is too long", "too many tokens", "input is too long"]
+        .iter()
+        .any(|p| e.contains(p));
+    if !hit {
+        return None;
+    }
+    static LIMIT: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r"(?:maximum context length is|context window (?:of|is)|limit (?:of|is)|maximum of|max(?:imum)?[^0-9]{0,20})\s*([0-9][0-9,]{3,})").unwrap()
+    });
+    Some(LIMIT.captures(&e).and_then(|c| c[1].replace(',', "").parse().ok()))
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    
+    #[test]
+    fn recognises_context_overflow_errors() {
+        let openai = "HTTP 400: This model's maximum context length is 272,000 tokens. However, your messages resulted in 301,442 tokens.";
+        assert_eq!(overflow(openai), Some(Some(272_000)));
+        assert_eq!(overflow("HTTP 400: prompt is too long: 1050211 tokens > 1000000 maximum"), Some(None));
+        assert_eq!(overflow("HTTP 429: rate limit exceeded"), None);
+    }
 
     #[tokio::test]
     async fn rejected_optional_fields_are_remembered_per_endpoint_and_model() {
