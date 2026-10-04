@@ -33,6 +33,12 @@ keep working, and approvals and results wait for you.
 - **Fast paths:** grep/glob in-process (ripgrep's crates), independent read-only tool calls in
   parallel, long output clipped to head and tail, a stable prompt prefix that stays cached,
   @-mentioned files inlined with their tag.
+- **Subagents:** a `task` tool hands a self-contained job to a fresh context. Read-only
+  "explore" subagents issued together run in parallel; "work" subagents can edit behind the
+  same approvals. Only their reports enter the parent's context.
+- **Automatic compaction:** past a context budget (default 300k tokens) the conversation is
+  summarized – server-side on Anthropic models that support it, so caching and thinking stay
+  valid; by the model itself elsewhere. `/compact` does it on demand.
 - **Modes:** ask, accept edits, plan (read-only), autonomous – approvals show the diff and can
   be answered from any device.
 - **Durable:** history is saved after every step; a restarted agent resumes the session and
@@ -71,6 +77,8 @@ sci-pi update             # push this build to every host (refuses while agents 
 [native]
 model = "claude-opus-5-5"        # or "<provider>/<model>"
 effort = "xhigh"
+subagent_model = "claude-sonnet-5-5"   # optional: cheaper subagents
+compact_at_tokens = 300000
 
 [native.providers.cliproxy]      # a CLIProxyAPI server
 kind = "cliproxy"
