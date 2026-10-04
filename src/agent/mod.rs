@@ -364,7 +364,13 @@ impl Server {
                     Err(error) => eprintln!("Anthropic model discovery failed: {error:#}"),
                 }
             }
-        } 
+        } else if crate::anthropic_auth::status().ok().flatten().is_some() {
+            let catalog = self.catalog.lock();
+            let mut registry = self.registry.lock();
+            for (id, info) in catalog.iter().filter(|(_, info)| info.provider.as_deref() == Some("anthropic")) {
+                registry.entry(id.clone()).or_insert_with(|| info.clone());
+            }
+        }
         if !self.native.model.is_empty() {
             let mut registry = self.registry.lock();
             let builtin = self.native.model.strip_prefix("anthropic/")
@@ -382,7 +388,7 @@ impl Server {
         if let Some(config) = self.native.providers.get(provider) {
             config.pay_per_token.unwrap_or(config.kind != ProviderKind::Cliproxy)
         } else {
-            config::credential("anthropic", None).is_some()
+            config::credential("anthropic", None).is_some_and(|key| !key.starts_with("sk-ant-oat"))
         }
     }
 
@@ -509,7 +515,7 @@ impl Server {
             return Ok((provider, m.to_string()));
         }
         if self.info(model).provider.as_deref() == Some("anthropic") {
-            let api_key = config::credential("anthropic", None).ok_or_else(|| llm::no_key("anthropic"))?;
+            let api_key = crate::anthropic_auth::credential(&self.http).await?;
             let base_url = std::env::var("ANTHROPIC_BASE_URL").unwrap_or_else(|_| "https://api.anthropic.com".into());
             return Ok((Provider::Anthropic { api_key, base_url, proxy: false }, model.to_string()));
         }
@@ -572,6 +578,7 @@ impl Server {
             if token.is_cancelled() {
                 return Ok("cancelled");
             }
+            // Persist any rotated OAuth credentials before honoring cancellation.
             let (provider, api_model) = self.provider(&model).await?;
             if token.is_cancelled() {
                 return Ok("cancelled");
@@ -593,7 +600,7 @@ impl Server {
             };
             let info = self.info(&model);
             let opts = Opts::from_info(&info, &settings.effort, settings.fast);
-            let req = Request { model: &api_model, system, messages: history, tools: tool_defs, opts: &opts };
+            let req = Request { model: &api_model, system, messages: history, tools: tool_defs, opts: &opts, session_id: &s.id };
             let resp = tokio::select! {
                 r = provider.stream(&self.http, &req, &mut on) => r,
                 _ = token.cancelled() => return Ok("cancelled"),
@@ -687,7 +694,7 @@ impl Server {
         let opts = Opts::from_info(&info, &settings.effort, settings.fast);
         let result = async {
             let (provider, api_model) = self.provider(model).await?;
-            let req = Request { model: &api_model, system, messages: history, tools: tool_defs, opts: &opts };
+            let req = Request { model: &api_model, system, messages: history, tools: tool_defs, opts: &opts, session_id: &s.id };
             provider.compact(&self.http, &req).await
         }
         .await;

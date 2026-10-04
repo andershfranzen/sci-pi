@@ -1,5 +1,6 @@
 mod acp;
 mod agent;
+mod anthropic_auth;
 mod config;
 mod git;
 mod hub;
@@ -86,6 +87,10 @@ enum ServiceCmd {
 enum AuthCmd {
     /// Store an API key (read from stdin), e.g. `sci-pi auth set anthropic`.
     Set { provider: String },
+    /// Sign in to Anthropic using browser OAuth (supports remote/headless hosts).
+    Login { provider: String },
+    /// Remove sci-pi's saved OAuth login (does not remove API keys).
+    Logout { provider: String },
     /// Show which providers have credentials.
     Status,
 }
@@ -119,6 +124,16 @@ async fn main() -> Result<()> {
         }
         Cmd::Doctor => doctor().await,
         Cmd::Acp => agent::serve_stdio().await,
+        Cmd::Auth { cmd: AuthCmd::Login { provider } } => {
+            anyhow::ensure!(provider == "anthropic", "browser login is supported for anthropic only");
+            anthropic_auth::login().await
+        }
+        Cmd::Auth { cmd: AuthCmd::Logout { provider } } => {
+            anyhow::ensure!(provider == "anthropic", "OAuth logout is supported for anthropic only");
+            anthropic_auth::logout()?;
+            println!("removed sci-pi's Anthropic OAuth login; API keys are unchanged");
+            Ok(())
+        }
         Cmd::Auth { cmd: AuthCmd::Set { provider } } => {
             use std::io::IsTerminal;
             if std::io::stdin().is_terminal() {
@@ -134,8 +149,16 @@ async fn main() -> Result<()> {
         }
         Cmd::Auth { cmd: AuthCmd::Status } => {
             for p in ["anthropic", "openai"] {
-                let have = config::credential(p, None).is_some();
-                println!("{} {p}", if have { "✓" } else { "✗" });
+                if config::credential(p, None).is_some() {
+                    println!("✓ {p} (API key)");
+                } else if p == "anthropic" {
+                    match anthropic_auth::status()? {
+                        Some(status) => println!("✓ {p} ({status})"),
+                        None => println!("✗ {p}"),
+                    }
+                } else {
+                    println!("✗ {p}");
+                }
             }
             for p in config::credential_providers().into_iter().filter(|p| p != "anthropic" && p != "openai") {
                 println!("✓ {p}");

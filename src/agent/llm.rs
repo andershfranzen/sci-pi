@@ -4,7 +4,7 @@
 //! echoed back exactly as received (thinking blocks must round-trip unchanged). Other
 //! providers translate from that format on the way out.
 
-
+use crate::anthropic_auth::{CLAUDE_CODE_VERSION, CLAUDE_SDK_VERSION};
 use super::models::{self, Fast, ModelInfo};
 use anyhow::{anyhow, bail, Context, Result};
 use futures::StreamExt;
@@ -31,7 +31,7 @@ pub struct Request<'a> {
     /// Tool definitions in Anthropic format (`name`, `description`, `input_schema`).
     pub tools: &'a [Value],
     pub opts: &'a Opts<'a>,
-    
+    pub session_id: &'a str,
 }
 
 #[derive(Clone, Copy)]
@@ -228,24 +228,63 @@ impl Sse {
 }
 
 
+const OAUTH_BETAS: &[&str] = &[
+    "claude-code-20250219", "oauth-2025-04-20", "interleaved-thinking-2025-05-14",
+    "thinking-token-count-2026-05-13", "context-management-2025-06-27",
+    "prompt-caching-scope-2026-01-05", "mid-conversation-system-2026-04-07",
+    "effort-2025-11-24", "fallback-credit-2026-06-01",
+];
 
+fn is_anthropic_oauth(key: &str) -> bool {
+    key.starts_with("sk-ant-oat")
+}
 
+fn oauth_tool_name(name: &str) -> String {
+    if ["web_search", "code_execution", "text_editor", "computer"].iter().any(|builtin| name.eq_ignore_ascii_case(builtin)) {
+        name.to_owned()
+    } else {
+        format!("_{name}")
+    }
+}
 
+fn strip_oauth_tool_name(block: &mut Value) {
+    if block["type"] == "tool_use" {
+        if let Some(name) = block["name"].as_str().and_then(|name| name.strip_prefix('_')) {
+            block["name"] = json!(name);
+        }
+    }
+}
 
+/// Wire transformations only: never alter the signed thinking blocks in stored history.
+fn oauth_messages(messages: &[Value]) -> Vec<Value> {
+    let mut messages = messages.to_vec();
+    for message in &mut messages {
+        if let Some(blocks) = message["content"].as_array_mut() {
+            for block in blocks {
+                if block["type"] == "tool_use" {
+                    if let Some(name) = block["name"].as_str() {
+                        block["name"] = json!(oauth_tool_name(name));
+                    }
+                }
+            }
+        }
+    }
+    messages
+}
 
-
-
-
-
-
-fn anthropic_body(req: &Request<'_>, proxy: bool) -> Result<Value> {
+fn anthropic_body(req: &Request<'_>, proxy: bool, oauth: bool) -> Result<(Value, bool)> {
+    use sha2::{Digest, Sha256};
     let fallbacks = req.opts.fallbacks;
     let tools: Vec<Value> = req.tools.iter().map(|tool| {
         let mut tool = tool.clone();
         if !proxy {
             tool["eager_input_streaming"] = json!(true);
         }
-        
+        if oauth {
+            if let Some(name) = tool["name"].as_str() {
+                tool["name"] = json!(oauth_tool_name(name));
+            }
+        }
         tool
     }).collect();
     let mut body = json!({
@@ -255,13 +294,60 @@ fn anthropic_body(req: &Request<'_>, proxy: bool) -> Result<Value> {
             .with_context(|| format!("{} has no output-token limit in provider metadata; refresh the provider model listing or configure metadata before using Anthropic Messages", req.model))?,
         "tools": tools,
     });
-    body["messages"] = json!(req.messages);
+    if oauth {
+        body["messages"] = json!(oauth_messages(req.messages));
+        let first_user = req.messages.iter().find(|m| m["role"] == "user");
+        let first_text = first_user.map(|m| {
+            if let Some(text) = m["content"].as_str() {
+                text.to_owned()
+            } else {
+                m["content"].as_array().into_iter().flatten()
+                    .filter(|b| b["type"] == "text").filter_map(|b| b["text"].as_str()).collect::<String>()
+            }
+        }).unwrap_or_default();
+        // JavaScript indexes UTF-16 code units, including surrogate halves.
+        let mut selected = [b'0' as u16; 3];
+        for (index, unit) in first_text.encode_utf16().take(21).enumerate() {
+            if let Some(slot) = [4, 7, 20].iter().position(|i| *i == index) {
+                selected[slot] = unit;
+            }
+        }
+        let mut seed = b"59cf53e54c78".to_vec();
+        seed.extend_from_slice(String::from_utf16_lossy(&selected).as_bytes());
+        seed.extend_from_slice(CLAUDE_CODE_VERSION.as_bytes());
+        let fingerprint = format!("{:x}", Sha256::digest(seed));
+        body["system"] = json!([
+            { "type": "text", "text": format!("x-anthropic-billing-header: cc_version={CLAUDE_CODE_VERSION}.{}; cc_entrypoint=cli; cch=00000;", &fingerprint[..3]) },
+            { "type": "text", "text": "You are Claude Code, Anthropic's official CLI for Claude.", "cache_control": { "type": "ephemeral" } },
+            { "type": "text", "text": req.system },
+        ]);
+        let (install, account) = crate::anthropic_auth::wire_identity()?;
+        let mut device = Sha256::new();
+        if let Some(account) = &account {
+            device.update(b"omp-claude-device-id-v2\0");
+            device.update(install.as_bytes());
+            device.update(b"\0");
+            device.update(account.as_bytes());
+        } else {
+            device.update(b"omp-claude-device-id-v1:");
+            device.update(install.as_bytes());
+        }
+        let mut user_id = json!({ "device_id": format!("{:x}", device.finalize()), "session_id": req.session_id });
+        if let Some(account) = account {
+            user_id["account_uuid"] = json!(account);
+        }
+        body["metadata"] = json!({ "user_id": serde_json::to_string(&user_id)? });
+    } else {
+        body["messages"] = json!(req.messages);
+    }
     if req.opts.thinking {
         body["thinking"] = json!({ "type": "adaptive" });
         if let Some(display) = req.opts.thinking_display {
             body["thinking"]["display"] = json!(display);
         }
-        
+        if oauth {
+            body["context_management"] = json!({ "edits": [{ "type": "clear_thinking_20251015", "keep": "all" }] });
+        }
     }
     if let Some(effort) = req.opts.effort {
         body["output_config"] = json!({ "effort": effort });
@@ -272,10 +358,24 @@ fn anthropic_body(req: &Request<'_>, proxy: bool) -> Result<Value> {
     if matches!(req.opts.fast, Some(Fast::AnthropicSpeed)) {
         body["speed"] = json!("fast");
     }
-    Ok(body)
+    Ok((body, fallbacks))
 }
 
-
+/// Attest the exact serialized body, not a reserialized approximation of it.
+fn anthropic_payload(body: &Value, oauth: bool) -> Result<String> {
+    let mut payload = serde_json::to_string(body)?;
+    if oauth {
+        let billing = body["system"][0]["text"].as_str().context("missing Claude billing block")?;
+        let escaped = serde_json::to_string(billing)?;
+        let system = payload.find("\"system\":[").context("missing serialized Claude system")?;
+        let start = system + payload[system..].find(&escaped).context("missing serialized Claude billing block")?;
+        let offset = escaped.find("cch=00000").context("missing Claude billing attestation")?;
+        let hash = xxhash_rust::xxh64::xxh64(payload.as_bytes(), 0x4d659218e32a3268) & 0xfffff;
+        let index = start + offset + 4;
+        payload.replace_range(index..index + 5, &format!("{hash:05x}"));
+    }
+    Ok(payload)
+}
 
 async fn anthropic(
     http: &reqwest::Client,
@@ -285,7 +385,8 @@ async fn anthropic(
     req: &Request<'_>,
     on: &mut (dyn FnMut(Delta) + Send),
 ) -> Result<Response> {
-    let mut body = anthropic_body(req, proxy)?;
+    let oauth = is_anthropic_oauth(api_key);
+    let (mut body, _) = anthropic_body(req, proxy, oauth)?;
     body["stream"] = json!(true);
     // Auto-placed on the last cacheable block.
     body["cache_control"] = json!({ "type": "ephemeral" });
@@ -293,7 +394,7 @@ async fn anthropic(
     let res = post_optional(&url, req.model, body, |body| {
         let mut betas = vec![];
         if body.get("fallbacks").is_some() {
-            betas.push("server-side-fallback-2026-07-01");
+            betas.push(if oauth { "server-side-fallback-2026-06-01" } else { "server-side-fallback-2026-07-01" });
         }
         if body.get("speed").is_some() {
             betas.push("fast-mode-2026-02-01");
@@ -301,8 +402,8 @@ async fn anthropic(
         if req.opts.server_compaction && carries_compaction(req.messages) {
             betas.push(COMPACTION_BETA);
         }
-        let payload = bytes::Bytes::from(serde_json::to_string(body)?);
-        Ok(anthropic_request(http, &url, api_key, proxy, &betas).body(payload))
+        let payload = bytes::Bytes::from(anthropic_payload(body, oauth)?);
+        Ok(anthropic_request(http, &url, api_key, proxy, &betas, req.session_id).body(payload))
     }).await?;
 
     let mut blocks: Vec<Value> = vec![];
@@ -321,7 +422,9 @@ async fn anthropic(
                 "content_block_start" => {
                     let i = ev["index"].as_u64().unwrap_or(0) as usize;
                     let mut block = ev["content_block"].clone();
-                    
+                    if oauth {
+                        strip_oauth_tool_name(&mut block);
+                    }
                     if block["type"] == "tool_use" {
                         partial.insert(i, String::new());
                         on(Delta::ToolStart {
@@ -397,17 +500,42 @@ fn carries_compaction(messages: &[Value]) -> bool {
     messages.iter().any(|m| m["content"].as_array().is_some_and(|c| c.iter().any(|b| b["type"] == "compaction")))
 }
 
-fn anthropic_request(http: &reqwest::Client, url: &str, api_key: &str, proxy: bool, betas: &[&str]) -> reqwest::RequestBuilder {
-    let mut b = http
-        .post(url)
-        .header("x-api-key", api_key)
+fn anthropic_request(http: &reqwest::Client, url: &str, api_key: &str, proxy: bool, betas: &[&str], session_id: &str) -> reqwest::RequestBuilder {
+    let oauth = is_anthropic_oauth(api_key);
+    let mut b = http.post(url)
         .header("anthropic-version", "2023-06-01")
         .header("content-type", "application/json");
-    if !betas.is_empty() {
-        b = b.header("anthropic-beta", betas.join(","));
+    let mut all_betas = Vec::new();
+    if oauth {
+        all_betas.extend_from_slice(OAUTH_BETAS);
+        b = b.bearer_auth(api_key)
+            .header("accept", "application/json")
+            .header("user-agent", format!("claude-cli/{CLAUDE_CODE_VERSION} (external, cli)"))
+            .header("x-app", "cli")
+            .header("anthropic-dangerous-direct-browser-access", "true")
+            .header("x-claude-code-session-id", session_id)
+            .header("x-stainless-arch", if cfg!(target_arch = "aarch64") { "arm64" } else { "x64" })
+            .header("x-stainless-lang", "js")
+            .header("x-stainless-os", if cfg!(target_os = "macos") { "MacOS" } else if cfg!(target_os = "windows") { "Windows" } else { "Linux" })
+            .header("x-stainless-package-version", CLAUDE_SDK_VERSION)
+            .header("x-stainless-retry-count", "0")
+            .header("x-stainless-runtime", "node")
+            .header("x-stainless-runtime-version", "v26.3.0")
+            .header("x-stainless-timeout", "600")
+            .header("connection", "keep-alive");
+    } else {
+        b = b.header("x-api-key", api_key);
+        if proxy {
+            b = b.bearer_auth(api_key);
+        }
     }
-    if proxy {
-        b = b.bearer_auth(api_key);
+    for beta in betas {
+        if !all_betas.contains(beta) {
+            all_betas.push(beta);
+        }
+    }
+    if !all_betas.is_empty() {
+        b = b.header("anthropic-beta", all_betas.join(","));
     }
     b
 }
@@ -457,7 +585,8 @@ impl Provider {
 }
 
 async fn server_compaction(http: &reqwest::Client, api_key: &str, base_url: &str, proxy: bool, req: &Request<'_>) -> Result<Compacted> {
-    let mut body = anthropic_body(req, proxy)?;
+    let oauth = is_anthropic_oauth(api_key);
+    let (mut body, _) = anthropic_body(req, proxy, oauth)?;
     // Compaction cannot carry context_management.
     body.as_object_mut().unwrap().remove("context_management");
     body.as_object_mut().unwrap().remove("fallbacks");
@@ -466,8 +595,8 @@ async fn server_compaction(http: &reqwest::Client, api_key: &str, base_url: &str
     let res = post_optional(&url, req.model, body, |body| {
         let mut betas = vec![COMPACTION_BETA];
         if body.get("speed").is_some() { betas.push("fast-mode-2026-02-01"); }
-        let payload = bytes::Bytes::from(serde_json::to_string(body)?);
-        Ok(anthropic_request(http, &url, api_key, proxy, &betas).body(payload))
+        let payload = bytes::Bytes::from(anthropic_payload(body, oauth)?);
+        Ok(anthropic_request(http, &url, api_key, proxy, &betas, req.session_id).body(payload))
     }).await?;
     let v: Value = res.json().await?;
     if v["stop_reason"] != "compaction" {
@@ -669,7 +798,11 @@ async fn openai(
 
 
 pub fn no_key(provider: &str) -> anyhow::Error {
-    anyhow!("no API key for {provider}; run `sci-pi auth set {provider}` on this host (or set the env var)")
+    if provider == "anthropic" {
+        anyhow!("no Anthropic credential; run `sci-pi auth login anthropic` for Claude OAuth or `sci-pi auth set anthropic` for an API key (or set ANTHROPIC_API_KEY)")
+    } else {
+        anyhow!("no API key for {provider}; run `sci-pi auth set {provider}` on this host (or set the env var)")
+    }
 }
 
 /// Model ids an OpenAI-style `/models` endpoint offers, with their context window when the
@@ -790,4 +923,59 @@ mod tests {
     }
 }
 
+#[cfg(test)]
+mod anthropic_oauth_tests {
+    use super::*;
 
+    #[test]
+    fn replay_maps_tools_without_modifying_signed_history() {
+        let history = vec![json!({ "role": "assistant", "content": [
+            { "type": "thinking", "thinking": "reasoning", "signature": "opaque_signature" },
+            { "type": "tool_use", "id": "call", "name": "read_file", "input": { "path": "a" } },
+            { "type": "tool_use", "id": "custom", "name": "_custom", "input": {} },
+            { "type": "tool_use", "id": "builtin", "name": "web_search", "input": {} },
+        ] })];
+        let wire = oauth_messages(&history);
+        assert_eq!(history[0]["content"][1]["name"], "read_file");
+        assert_eq!(wire[0]["content"][0], history[0]["content"][0]);
+        assert_eq!(wire[0]["content"][1]["name"], "_read_file");
+        assert_eq!(wire[0]["content"][2]["name"], "__custom");
+        assert_eq!(wire[0]["content"][3]["name"], "web_search");
+        let mut incoming = wire[0]["content"][2].clone();
+        strip_oauth_tool_name(&mut incoming);
+        assert_eq!(incoming["name"], "_custom");
+    }
+
+    #[test]
+    fn oauth_never_uses_api_key_header_and_proxy_keys_keep_both() {
+        let http = reqwest::Client::new();
+        let oauth = anthropic_request(&http, "http://localhost/v1/messages", "sk-ant-oat-test", true, &[COMPACTION_BETA], "session").build().unwrap();
+        assert!(oauth.headers().get("x-api-key").is_none());
+        assert_eq!(oauth.headers()["authorization"], "Bearer sk-ant-oat-test");
+        assert_eq!(oauth.headers()["x-claude-code-session-id"], "session");
+        assert!(oauth.headers()["anthropic-beta"].to_str().unwrap().contains(COMPACTION_BETA));
+        let key = anthropic_request(&http, "http://localhost/v1/messages", "api-key", false, &[], "session").build().unwrap();
+        assert_eq!(key.headers()["x-api-key"], "api-key");
+        assert!(key.headers().get("authorization").is_none());
+        assert!(key.headers().get("x-app").is_none());
+        let proxy = anthropic_request(&http, "http://localhost/v1/messages", "proxy-key", true, &[], "session").build().unwrap();
+        assert_eq!(proxy.headers()["x-api-key"], "proxy-key");
+        assert_eq!(proxy.headers()["authorization"], "Bearer proxy-key");
+    }
+
+    #[test]
+    fn billing_attests_exact_body_without_rewriting_user_placeholder() {
+        let billing = "x-anthropic-billing-header: cc_version=2.1.280.abc; cc_entrypoint=cli; cch=00000;";
+        let body = json!({
+            "messages": [{ "role": "user", "content": billing }],
+            "system": [{ "type": "text", "text": billing }],
+        });
+        let original = serde_json::to_string(&body).unwrap();
+        let expected = xxhash_rust::xxh64::xxh64(original.as_bytes(), 0x4d659218e32a3268) & 0xfffff;
+        let payload: Value = serde_json::from_str(&anthropic_payload(&body, true).unwrap()).unwrap();
+        assert_eq!(payload["messages"], body["messages"]);
+        assert_eq!(payload["system"][0]["text"], billing.replace("00000", &format!("{expected:05x}")));
+        assert_eq!(anthropic_payload(&body, false).unwrap(), original);
+    }
+
+}

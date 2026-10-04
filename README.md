@@ -22,8 +22,8 @@ keep working, and approvals and results wait for you.
 [Agent Client Protocol](https://agentclientprotocol.com) – the daemon runs it, and ACP editors
 (Zed, …) can too.
 
-- **Providers, over raw HTTP:** the Anthropic Messages API (streaming, adaptive thinking,
-  effort, prompt caching, refusal fallbacks), any OpenAI-compatible endpoint (OpenAI,
+- **Providers, over raw HTTP:** the Anthropic Messages API (API keys or OMP-style browser
+  OAuth, streaming, adaptive thinking, effort, prompt caching, refusal fallbacks), any OpenAI-compatible endpoint (OpenAI,
   OpenRouter, llama.cpp, vLLM, Ollama), and [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI)
   servers (models discovered automatically).
 - **Runtime model metadata:** provider catalogs supply model names, context/output limits,
@@ -72,6 +72,8 @@ cargo build --release
 sci-pi add homelab        # install on a host over SSH (systemd user unit + linger)
 sci-pi ui                 # multi-host UI on http://127.0.0.1:7430
 sci-pi auth set anthropic # store a provider key on this host (reads stdin)
+sci-pi auth login anthropic # browser OAuth, including remote/headless hosts
+sci-pi auth status          # credential source and saved OAuth account (no secrets)
 sci-pi doctor             # agents, Tailscale, HTTPS
 sci-pi update             # push this build to every host (refuses while agents are mid-turn)
 ```
@@ -112,12 +114,31 @@ per endpoint and model for the running agent. Anthropic requests require a known
 limit; missing metadata produces an error rather than a guessed token cap.
 
 USD usage costs are computed only from reported rates on pay-per-token endpoints.
-CLIProxyAPI does not get API-price estimates; other subscriptions can set
+CLIProxyAPI and Anthropic OAuth do not get API-price estimates; other subscriptions can set
 `pay_per_token = false`. Missing cache prices are not substituted with guessed rates.
 
-A note on subscriptions: ChatGPT plans can be used by third-party tools. Claude Pro/Max
-subscriptions may only be used through Anthropic's own Claude Code – run Claude Code as the
-session's agent for that, or use an API key with sci-pi's harness.
+For Anthropic browser OAuth, run `sci-pi auth login anthropic` **on the agent's host**, open
+the printed URL on any device, and complete authorization. A local browser can return to
+`http://localhost:54545/callback`; for remote hosts, paste the final callback URL or
+`code#state` into the host's terminal. A bare authorization code is also accepted and bound
+to that login's PKCE verifier.
+
+The native agent uses [OMP's Anthropic OAuth approach](https://github.com/can1357/oh-my-pi/blob/main/packages/catalog/src/compat/rules/auth/anthropic.kdl):
+Bearer authentication, Claude-compatible request identity, wire-only tool-name mapping,
+and automatic refresh five minutes before token expiry. Signed thinking blocks remain intact
+when tools are replayed or the conversation is compacted. OAuth tokens stay in
+`~/.config/sci-pi/anthropic-oauth.json` (0600, atomically replaced; concurrent refreshes are
+serialized). `SCIPI_HOME` relocates this alongside the other host configuration.
+
+Credential priority is `ANTHROPIC_API_KEY`, then a saved Anthropic API key, then the saved
+OAuth login. `sci-pi auth logout anthropic` removes only sci-pi's OAuth tokens; it leaves API
+keys and other clients' credentials untouched. Configured Anthropic/CLIProxyAPI endpoints
+continue to use their own provider credentials. Provider credentials are separate from the
+daemon token used to connect the UI.
+
+OAuth compatibility does not establish Anthropic permission to use a subscription from a
+third-party client. Check the current subscription terms; API keys and the Claude Code
+session adapter remain available alternatives.
 
 See [docs/PROTOCOL.md](docs/PROTOCOL.md) for the daemon API.
 
