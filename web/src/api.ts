@@ -24,6 +24,17 @@ export class ApiError extends Error {
   }
 }
 
+export interface DeviceCredential {
+  id: string;
+  name: string;
+  created_at: number;
+}
+
+export interface AuthIdentity {
+  admin: boolean;
+  device_id: string | null;
+}
+
 export interface ApiTarget {
   url: string;
   token: string;
@@ -75,6 +86,16 @@ export class Api {
     }
     return json as T;
   }
+
+  call<T>(method: string, path: string, body?: unknown) {
+    return this.req<T>(method, path, body);
+  }
+  authMe() { return this.req<AuthIdentity>("GET", "/auth/me"); }
+  devices() { return this.req<DeviceCredential[]>("GET", "/auth/devices"); }
+  revokeDevice(id: string) { return this.req<object>("DELETE", `/auth/devices/${enc(id)}`); }
+  revokeSelf() { return this.req<object>("DELETE", "/auth/me"); }
+  issuePair(name: string) { return this.req<{ url: string; expires_at: number }>("POST", "/auth/pair", { name }); }
+  redeemPair(code: string) { return this.req<{ token: string; device: DeviceCredential }>("POST", "/auth/redeem", { code }); }
 
   info() {
     return this.req<Info>("GET", "/info");
@@ -164,24 +185,31 @@ export class Api {
     return this.req<FsList>("GET", `/fs/list${path ? `?path=${encodeURIComponent(path)}` : ""}`);
   }
 
-  private tokenParam(first: boolean) {
-    if (!this.token) return "";
-    return `${first ? "?" : "&"}token=${encodeURIComponent(this.token)}`;
+  wsProtocols() {
+    if (!this.token) return ["sci-pi"];
+    const bytes = new TextEncoder().encode(this.token);
+    const encoded = btoa(Array.from(bytes, (b) => String.fromCharCode(b)).join(""))
+      .replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+    return ["sci-pi", `bearer.${encoded}`];
   }
 
   wsUrl(after: number) {
     const base = this.url.replace(/^http/, "ws");
-    return `${base}/api/ws?after=${after}${this.tokenParam(false)}`;
+    return `${base}/api/ws?after=${after}`;
   }
 
   terminalUrl(id: string) {
     const base = this.url.replace(/^http/, "ws");
-    return `${base}/api/sessions/${enc(id)}/terminal${this.tokenParam(true)}`;
+    return `${base}/api/sessions/${enc(id)}/terminal`;
   }
 
-  /** URL for an uploaded attachment, usable as an <img src> (token as a query param). */
-  attachmentUrl(name: string) {
-    return `${this.url}/api/attachments/${enc(name)}${this.tokenParam(true)}`;
+  /** Fetch image bytes with Authorization; only a local Blob URL reaches the DOM. */
+  async attachment(name: string): Promise<Blob> {
+    const res = await fetch(`${this.url}/api/attachments/${enc(name)}`, {
+      headers: this.token ? { Authorization: `Bearer ${this.token}` } : {},
+    });
+    if (!res.ok) throw new ApiError(res.status, "Could not load attachment");
+    return res.blob();
   }
 }
 

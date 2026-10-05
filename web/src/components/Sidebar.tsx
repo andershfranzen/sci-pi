@@ -21,6 +21,7 @@ export function Sidebar({
   onNew,
   onPalette,
   onHelp,
+  onDevices,
 }: {
   route: Route;
   open: boolean;
@@ -28,11 +29,13 @@ export function Sidebar({
   onNew: () => void;
   onPalette: () => void;
   onHelp: () => void;
+  onDevices?: () => void;
 }) {
   useTick(30_000);
   const [filter, setFilter] = useState("");
   const [showArchived, setShowArchived] = useState(false);
   const host = currentHost();
+  const build = host?.info?.build;
   const pending = totalPending();
   const hub = store.mode === "hub";
   const active = host ? sortedSessions(host).filter((s) => matches(s, filter)) : [];
@@ -140,12 +143,32 @@ export function Sidebar({
           <button className="icon-btn tiny" onClick={onHelp} title="Keyboard shortcuts (?)" aria-label="Keyboard shortcuts">
             <IconKeyboard size={13} />
           </button>
-          {host?.info?.viewer ? (
-            <span title={host.info.tailnet_url ?? undefined}>
-              Signed in via Tailscale as <strong>{host.info.viewer}</strong>
-            </span>
-          ) : (
-            <span>{host?.info ? `sci-pi ${host.info.version}` : ""}</span>
+          {onDevices && (
+            <button className="linkish" onClick={onDevices} title="Pair and revoke devices">Devices</button>
+          )}
+          {host?.info && (
+            <details style={{ minWidth: 0 }} title="Daemon build details">
+              <summary>
+                {build
+                  ? `${build.version} · ${build.commit?.slice(0, 8) ?? "unknown commit"}${build.dirty ? "+dirty" : ""} · ${build.id.slice(0, 8)}`
+                  : `${host.info.version} · build unknown`}
+              </summary>
+              <div style={{ overflowWrap: "anywhere", whiteSpace: "normal" }}>
+                {build ? (
+                  <>
+                    <div>Build: {build.id}</div>
+                    <div>Commit: {build.commit ?? "unknown (source archive)"}</div>
+                    <div>Source: {build.commit ? (build.dirty ? "modified" : "clean") : "revision unavailable"}</div>
+                    <div>Built: {new Date(build.built_at * 1000).toISOString()}</div>
+                  </>
+                ) : (
+                  <div>This daemon does not report a build identity.</div>
+                )}
+                {host.info.viewer && (
+                  <div>Signed in via Tailscale as <strong>{host.info.viewer}</strong></div>
+                )}
+              </div>
+            </details>
           )}
         </div>
       </aside>

@@ -22,18 +22,85 @@ export interface Usage {
   cost?: { amount: number; currency: string };
 }
 
+export type MetadataSource = "provider" | "models_dev" | "user_override" | "learned_overflow";
+
+export interface ModelMetadata {
+  endpoint?: string | null;
+  endpoint_id?: string | null;
+  pay_per_token: boolean;
+  info: {
+    name?: string | null;
+    window?: number | null;
+    max_output?: number | null;
+    efforts: [string, string | null][];
+    efforts_known: boolean;
+    default_effort?: string | null;
+    adaptive_thinking?: boolean | null;
+    fast?: { kind: "anthropic_speed" } | { kind: "service_tier"; tier: string; description?: string | null } | null;
+    fast_known: boolean;
+    thinking_display?: string | null;
+    fallbacks?: boolean | null;
+    server_compaction?: boolean | null;
+    reasoning?: boolean | null;
+    cost?: { input?: number | null; output?: number | null; cache_read?: number | null; cache_write?: number | null } | null;
+    provenance: Record<string, MetadataSource>;
+  };
+}
+
+export interface RequestDiagnostic {
+  id: string;
+  at_ms?: number;
+  route?: "anthropic_key" | "anthropic_oauth" | "anthropic_proxy" | "openai";
+  endpoint?: string | null;
+  model?: string | null;
+  phase?: "inference" | "compaction";
+  attempt?: number;
+  state: "pending" | "response" | "network_error";
+  http_status?: number | null;
+  request_id?: string | null;
+  effort?: string | null;
+  fast?: string | null;
+  thinking?: boolean;
+  server_compaction?: boolean;
+  compaction?: boolean;
+  cache_owner?: "client" | "proxy" | "none";
+  explicit_cache_points?: number;
+  automatic_cache?: boolean;
+  context_window?: number | null;
+  max_output?: number | null;
+  rejected_fields?: string[];
+}
+
+export interface TurnRecovery {
+  turn: number;
+  outcome: "completed" | "failed" | "cancelled" | "interrupted";
+  completed_tools: number;
+  started_tools: number;
+  resumable: boolean;
+  message: string;
+}
+
+export interface BuildInfo {
+  id: string;
+  commit: string | null;
+  dirty: boolean;
+  built_at: number;
+  version: string;
+}
+
 export interface ConfigOption {
   id: string;
   name: string;
   description?: string;
   /** "mode" | "model" | "thought_level" | … */
   category?: string;
-  /** "select" renders as a dropdown; other types are shown read-only */
+  /** "select" is a dropdown, "boolean" is a toggle; other types are read-only */
   type: string;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   currentValue: any;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   options?: { value: any; name: string; description?: string }[];
+  metadata?: ModelMetadata;
 }
 
 export type Attachment =
@@ -48,6 +115,7 @@ export interface QueueItem {
   id: string;
   text: string;
   attachments: Attachment[];
+  retry_of?: number | null;
 }
 
 export interface SlashCommand {
@@ -75,6 +143,10 @@ export interface Session {
   commands: SlashCommand[];
   prompt_caps: { image?: boolean; embeddedContext?: boolean } | null;
   turns: number;
+  recovery?: TurnRecovery | null;
+  request_diagnostics?: RequestDiagnostic[];
+  queue_paused?: boolean;
+  retry_pending?: boolean;
   pinned: boolean;
   archived: boolean;
   pr_url: string | null;
@@ -93,6 +165,7 @@ export type EventKind =
   | "git"
   | "pr_created"
   | "forked"
+  | "retry_requested"
   | "status"
   | "error";
 
@@ -157,6 +230,7 @@ export interface AgentInfo {
 export interface Info {
   host: string;
   version: string;
+  build?: BuildInfo;
   home: string;
   agents: AgentInfo[];
   last_event_id: number;

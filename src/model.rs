@@ -23,6 +23,25 @@ pub struct Mode {
     pub description: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TurnOutcome {
+    Completed,
+    Failed,
+    Cancelled,
+    Interrupted,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TurnRecovery {
+    pub turn: u32,
+    pub outcome: TurnOutcome,
+    pub completed_tools: u32,
+    pub started_tools: u32,
+    pub resumable: bool,
+    pub message: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {
     pub id: String,
@@ -55,6 +74,10 @@ pub struct Session {
     #[serde(default)]
     pub turns: u32,
     #[serde(default)]
+    pub recovery: Option<TurnRecovery>,
+    #[serde(default)]
+    pub request_diagnostics: Vec<Value>,
+    #[serde(default)]
     pub pinned: bool,
     #[serde(default)]
     pub archived: bool,
@@ -75,6 +98,14 @@ pub struct Session {
     /// Prepended (invisibly) to the next prompt, e.g. after the user reverted files.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_note: Option<String>,
+    /// An unsuccessful active turn pauses, rather than silently consuming, the durable queue.
+    #[serde(default)]
+    pub queue_paused: bool,
+    #[serde(default)]
+    pub retry_pending: bool,
+    /// Persisted before checkpointing so even an early interruption can be retried.
+    #[serde(default)]
+    pub last_prompt: Option<QueuedPrompt>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -83,6 +114,8 @@ pub struct QueuedPrompt {
     pub text: String,
     #[serde(default)]
     pub attachments: Vec<Attachment>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_of: Option<u32>,
 }
 
 /// Something attached to a prompt. Images are stored on the daemon at upload time.

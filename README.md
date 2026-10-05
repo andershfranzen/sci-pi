@@ -75,7 +75,9 @@ sci-pi auth set anthropic # store a provider key on this host (reads stdin)
 sci-pi auth login anthropic # browser OAuth, including remote/headless hosts
 sci-pi auth status          # credential source and saved OAuth account (no secrets)
 sci-pi doctor             # agents, Tailscale, HTTPS
-sci-pi update             # push this build to every host (refuses while agents are mid-turn)
+sci-pi update             # push this build to every host (refuses active or queued work)
+sci-pi service install    # install/upgrade this laptop's daemon with the same restart guard
+sci-pi pair --name Laptop # pair a local browser with its own revocable credential
 ```
 
 `~/.config/sci-pi/config.toml`:
@@ -109,8 +111,9 @@ The model picker includes provider descriptions and runtime context/output limit
 Effort and Fast controls appear only when reported for the selected model; changing models
 selects that model's effort default and resets Fast. Explicit `native.context_windows`
 overrides are supported, but a smaller provider-reported overflow limit always wins and
-survives restarts in `data/agent/learned-windows.json`. Optional-field rejections are remembered
-per endpoint and model for the running agent. Anthropic requests require a known output
+survives restarts in `data/agent/learned-windows.json`, scoped by normalized endpoint and model.
+Legacy model-only learned limits are ignored because their endpoint cannot be established safely.
+Optional-field rejections are remembered per endpoint and model for the running agent. Anthropic requests require a known output
 limit; missing metadata produces an error rather than a guessed token cap.
 
 Direct Anthropic inference uses automatic prompt caching. Anthropic-compatible proxies
@@ -143,6 +146,60 @@ daemon token used to connect the UI.
 OAuth compatibility does not establish Anthropic permission to use a subscription from a
 third-party client. Check the current subscription terms; API keys and the Claude Code
 session adapter remain available alternatives.
+
+## Diagnostics and recovery
+
+The session header's **Diagnostics** opens HTTP attempts for the current or an earlier turn:
+route, sanitized endpoint, model, effective effort/Fast/thinking/compaction flags, cache
+placement ownership, limits, HTTP status, upstream request ID, and remembered optional-field
+rejections. No prompts, tool contents, signed thinking, credentials, or upstream error bodies
+are retained in these diagnostic records. HTTP headers received are not evidence of a completed
+turn. The **Model metadata** tab shows each effective value's source: provider, models.dev
+fallback, user override, or an endpoint-and-model-specific learned overflow limit.
+
+Failed, cancelled, and interrupted turns keep partial output and tool effects. An unsuccessful
+turn or daemon restart during a turn pauses queued work; idle Stop does not strand later prompts.
+**Resume** starts the adapter and releases the retained queue without repeating the earlier
+prompt. **Retry as new attempt** explicitly resends the original prompt and attachments as a
+new numbered turn. Neither action rolls back files, commands, or external effects; a retry may
+repeat them. Interrupted tool outcomes can remain unknown. Incomplete provider streams fail
+without retransmission or execution of unfinished tool calls.
+
+## Pairing and updates
+
+Run `sci-pi pair --name Laptop` on the daemon's host. Open its one-use, 120-second pairing
+link on a loopback address; `--no-open` prints it without launching a browser. The code lives
+only in the URL fragment and the UI removes it before API requests. Issuance requires the
+CLI/admin bearer; redemption requires a real loopback peer, a loopback Host, and matching
+browser Origin. Remote/Tailscale origins cannot redeem it; an SSH loopback tunnel can.
+
+The **Devices** dialog lists and independently revokes browser credentials, closing that
+credential's API and terminal sockets without changing other devices or the CLI/admin token.
+An administrator credential entered into this management dialog stays in memory until it
+closes. Device credentials are persisted as hashes in `devices.json` (0600); the master token
+remains a private local CLI/bootstrap credential. HTTP uses bearer headers, WebSockets use
+base64url bearer subprotocols, and attachment previews use authenticated Blob images, never
+active Blob documents. Token query URLs are no longer supported.
+
+**Only pair trusted devices:** the app grants terminals and agent tools full execution as the
+daemon's Unix account. Device-management authorization is not an OS privilege boundary.
+Revocation invalidates that bearer and closes its sockets; it cannot undo commands, remove
+installed access, invalidate copied master credentials, or revoke an independently allowed
+Tailscale identity.
+
+The sidebar and `sci-pi --version` identify the commit and unique source/build fingerprint.
+Archives report an unknown revision rather than borrowing an unrelated checkout's HEAD.
+Local and remote updates refuse active turns, approvals, queued work, and uncertain/auth-failed
+inspection. `--force` explicitly bypasses the preflight guard. After restart, installation
+verifies authenticated session inspection and the exact running build identity, not just the
+package version. Reload an existing browser tab after upgrading to load the new embedded UI.
+
+## Verification
+
+`bun run --cwd web build` checks and builds the UI. `cargo test --locked` includes real-binary,
+isolated provider boundary scenarios for Anthropic API-key/OAuth, CLIProxyAPI, and OpenAI:
+multi-round tools, signed replay, compaction/continuation, bounded optional rejection, partial
+stream errors and premature EOF, cancellation, and proxy cache-budget interaction.
 
 See [docs/PROTOCOL.md](docs/PROTOCOL.md) for the daemon API.
 

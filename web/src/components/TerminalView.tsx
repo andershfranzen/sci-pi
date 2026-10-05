@@ -93,7 +93,7 @@ export default function TerminalView({ h, session }: { h: HostState; session: Se
     ws.current?.close();
     setConn("connecting");
     setErr(null);
-    const s = new WebSocket(h.api.terminalUrl(session.id));
+    const s = new WebSocket(h.api.terminalUrl(session.id), h.api.wsProtocols());
     s.binaryType = "arraybuffer";
     ws.current = s;
     let first = true;

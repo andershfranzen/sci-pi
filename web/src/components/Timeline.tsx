@@ -2,7 +2,7 @@ import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState, type R
 import type { HostState } from "../store";
 import { dropInboxItem, emit } from "../store";
 import type { TItem } from "../timeline";
-import type { Attachment, Session } from "../types";
+import type { Attachment, Session, TurnRecovery } from "../types";
 import { navigate, sessionHash } from "../router";
 import { basename, clockTime, cx } from "../util";
 import { Markdown } from "./Markdown";
@@ -12,15 +12,49 @@ import { Modal } from "./Modal";
 import { Select } from "./Select";
 import { DiffFiles, DiffTotals, useDiff } from "./DiffView";
 
+function AttachmentImage({ h, name }: { h: HostState; name: string }) {
+  const [url, setUrl] = useState<string | null>(null);
+  const [failed, setFailed] = useState(false);
+  const [preview, setPreview] = useState(false);
+  useEffect(() => {
+    let alive = true;
+    let objectUrl: string | null = null;
+    setUrl(null);
+    setFailed(false);
+    setPreview(false);
+    h.api.attachment(name).then(
+      (blob) => {
+        if (!alive) return;
+        objectUrl = URL.createObjectURL(blob);
+        setUrl(objectUrl);
+      },
+      () => alive && setFailed(true),
+    );
+    return () => {
+      alive = false;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [h, name]);
+  if (!url) return <span className="fchip">{failed ? "Image unavailable" : "Loading image…"}</span>;
+  return (
+    <>
+      <button type="button" className="thumb" onClick={() => setPreview(true)} aria-label={`Preview image ${name}`} title={name}>
+        <img src={url} alt={name} loading="lazy" />
+      </button>
+      {preview && <Modal title="Attachment preview" onClose={() => setPreview(false)} wide>
+        <img className="attachment-preview" src={url} alt={name} />
+      </Modal>}
+    </>
+  );
+}
+
 function Attachments({ h, list }: { h: HostState; list: Attachment[] }) {
   if (!list.length) return null;
   return (
     <div className="bubble-attach">
       {list.map((a, i) =>
         a.type === "image" ? (
-          <a key={i} className="thumb" href={h.api.attachmentUrl(a.name)} target="_blank" rel="noopener noreferrer" title={a.name}>
-            <img src={h.api.attachmentUrl(a.name)} alt={a.name} loading="lazy" />
-          </a>
+          <AttachmentImage key={i} h={h} name={a.name} />
         ) : (
           <span key={i} className="fchip" title={a.path}>
             <IconFile size={12} />
@@ -65,6 +99,11 @@ function stopLabel(r: string) {
       return "Turn complete";
     case "cancelled":
       return "Cancelled";
+    case "error":
+    case "failed":
+      return "Turn failed";
+    case "interrupted":
+      return "Turn interrupted";
     case "max_tokens":
       return "Stopped: max tokens";
     case "max_turn_requests":
@@ -120,6 +159,7 @@ function TurnFooter({
   stopReason,
   ts,
   reverted,
+  recovery,
 }: {
   h: HostState;
   session: Session;
@@ -127,6 +167,7 @@ function TurnFooter({
   stopReason: string;
   ts: number;
   reverted: boolean;
+  recovery?: TurnRecovery | null;
 }) {
   const ref = useRef<HTMLDivElement>(null);
   const [visible, setVisible] = useState(false);
@@ -143,12 +184,17 @@ function TurnFooter({
   const busy = session.status === "running" || session.status === "awaiting_permission" || session.status === "starting";
 
   return (
-    <div className={cx("tl-turn", stopReason !== "end_turn" && "warn")} ref={ref}>
+    <div className={cx("tl-turn", (stopReason !== "end_turn" || (recovery && recovery.outcome !== "completed")) && "warn")} ref={ref}>
       <div className="turn-line">
         <span>
-          {stopLabel(stopReason)} · {clockTime(ts)}
+          {recovery && recovery.outcome !== "completed" ? `Turn ${recovery.outcome}` : stopLabel(stopReason)} · {clockTime(ts)}
         </span>
       </div>
+      {recovery && recovery.outcome !== "completed" && (
+        <div className="turn-line">
+          <span>{recovery.completed_tools} of {recovery.started_tools} tools completed. {recovery.message}</span>
+        </div>
+      )}
       {turn !== null && (
         <div className="turn-actions">
           {files === null ? (
@@ -319,7 +365,7 @@ function Item({ it, h, session, live }: { it: TItem; h: HostState; session: Sess
     case "perm":
       return <PermissionCard toolCall={it.toolCall} options={it.options} resolved={it.resolved} onChoose={choose} />;
     case "turn":
-      return <TurnFooter h={h} session={session} turn={it.turn} stopReason={it.stopReason} ts={it.ts} reverted={it.reverted} />;
+      return <TurnFooter h={h} session={session} turn={it.turn} stopReason={it.stopReason} ts={it.ts} reverted={it.reverted} recovery={it.recovery} />;
     case "forked": {
       const exists = h.sessions.has(it.from);
       return (

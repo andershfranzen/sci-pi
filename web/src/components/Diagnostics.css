@@ -1,0 +1,19 @@
+.diagnostics-trigger { padding: 4px 9px; font-size: 12px; }
+.diagnostics-note { font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
+.diagnostics-tabs { display: flex; gap: 6px; margin: 12px 0; }
+.diagnostics-tabs [aria-selected="true"] { color: var(--accent); background: var(--accent-soft, var(--bg-2)); }
+.diagnostic-request { margin-top: 12px; padding: 12px; border: 1px solid var(--border); border-radius: 10px; }
+.diagnostic-request > summary { cursor: pointer; font-weight: 600; line-height: 1.5; }
+.diagnostic-grid { display: grid; grid-template-columns: minmax(160px, 1fr) minmax(0, 2fr); gap: 8px 16px; margin: 16px 0; font-size: 12px; }
+.diagnostic-grid dt { color: var(--text-3); }
+.diagnostic-grid dd { margin: 0; overflow-wrap: anywhere; }
+.provenance-table { margin: 16px 0; font-size: 12px; }
+.provenance-row { display: grid; grid-template-columns: minmax(120px, 1fr) minmax(0, 1.2fr) minmax(100px, 1fr); gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--border); }
+.provenance-row > span { overflow-wrap: anywhere; }
+.provenance-row.heading { font-weight: 600; }
+@media (max-width: 639px) {
+  .diagnostic-grid { grid-template-columns: minmax(100px, 1fr) minmax(0, 1.3fr); gap: 8px; }
+  .provenance-row { grid-template-columns: minmax(100px, 1fr) minmax(0, 1.3fr); gap: 6px 12px; }
+  .provenance-row > span:last-child { grid-column: 1 / -1; font-size: 11px; }
+  .provenance-row:not(.heading) > span:last-child::before { content: "Source: "; }
+}

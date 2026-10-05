@@ -1,7 +1,7 @@
 // Reconstructs the conversation timeline from a session's event log.
 // The builder is incremental: appended events are folded in without touching unchanged
 // items, so React.memo on item components keeps re-renders cheap while streaming.
-import type { Attachment, OEvent, PermissionOption, PlanEntry, ToolCall } from "./types";
+import type { Attachment, OEvent, PermissionOption, PlanEntry, ToolCall, TurnRecovery } from "./types";
 
 export interface Resolution {
   outcome: "selected" | "cancelled" | string;
@@ -22,7 +22,7 @@ export type TItem =
       options: PermissionOption[];
       resolved: Resolution | null;
     }
-  | { t: "turn"; key: string; ts: number; stopReason: string; turn: number | null; reverted: boolean }
+  | { t: "turn"; key: string; ts: number; stopReason: string; turn: number | null; reverted: boolean; recovery: TurnRecovery | null }
   | { t: "forked"; key: string; ts: number; from: string; fromTitle: string; turn: number | null }
   | { t: "sys"; key: string; ts: number; text: string; level: "info" | "error" | "ok"; href?: string };
 
@@ -102,11 +102,15 @@ export class TimelineBuilder {
           turn: typeof d.turn === "number" ? d.turn : null,
         });
         this.planIdx = null;
+        this.toolIdx.clear();
+        if (typeof d.retry_of === "number") {
+          this.push(items, { t: "sys", key: `${key}-retry`, ts: e.ts, text: `New attempt of turn ${d.retry_of}. Earlier tool effects remain and may be repeated.`, level: "info" });
+        }
         return;
       case "turn_end": {
         const turn = typeof d.turn === "number" ? d.turn : null;
         if (turn !== null) this.turnIdx.set(turn, items.length);
-        this.push(items, { t: "turn", key, ts: e.ts, stopReason: String(d.stop_reason ?? "end_turn"), turn, reverted: false });
+        this.push(items, { t: "turn", key, ts: e.ts, stopReason: String(d.stop_reason ?? "end_turn"), turn, reverted: false, recovery: d.recovery ?? null });
         this.planIdx = null;
         return;
       }
@@ -144,6 +148,9 @@ export class TimelineBuilder {
         return;
       case "pr_created":
         this.push(items, { t: "sys", key, ts: e.ts, text: "Pull request opened", level: "ok", href: String(d.url ?? "") });
+        return;
+      case "retry_requested":
+        this.push(items, { t: "sys", key, ts: e.ts, text: String(d.message ?? "Retry requested. Previous tool effects remain."), level: "info" });
         return;
       case "error":
         this.push(items, { t: "sys", key, ts: e.ts, text: String(d.message ?? "error"), level: "error" });

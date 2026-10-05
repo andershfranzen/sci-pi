@@ -7,6 +7,7 @@ import { SessionView } from "./components/SessionView";
 import { Inbox } from "./components/Inbox";
 import { NewSessionDialog } from "./components/NewSession";
 import { TokenScreen } from "./components/TokenScreen";
+import { DeviceSettings } from "./components/DeviceSettings";
 import { Home } from "./components/Home";
 import { Palette, ShortcutsOverlay } from "./components/Palette";
 import { IconMenu } from "./components/Icons";
@@ -23,6 +24,7 @@ export function App() {
   const [newOpen, setNewOpen] = useState(false);
   const [palette, setPalette] = useState(false);
   const [help, setHelp] = useState(false);
+  const [devices, setDevices] = useState(false);
   const routeRef = useRef(route);
   routeRef.current = route;
 
@@ -135,6 +137,7 @@ export function App() {
     <div className="app">
       <Sidebar
         route={route}
+        onDevices={() => { setDrawer(false); setDevices(true); }}
         open={drawer}
         onClose={() => setDrawer(false)}
         onNew={() => {
@@ -152,6 +155,7 @@ export function App() {
       />
       <main className="main">{main}</main>
       {newOpen && host && <NewSessionDialog initialHost={host} onClose={() => setNewOpen(false)} />}
+      {devices && host && <DeviceSettings key={host.key} h={host} onClose={() => setDevices(false)} />}
       {palette && <Palette route={route} onClose={closePalette} onNew={openNew} onHelp={openHelp} />}
       {help && <ShortcutsOverlay onClose={() => setHelp(false)} />}
     </div>

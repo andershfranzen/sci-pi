@@ -397,7 +397,7 @@ class HostConn {
 
   private openWs(gen: number) {
     const h = this.h;
-    const ws = new WebSocket(h.api.wsUrl(h.wsCursor ?? 0));
+    const ws = new WebSocket(h.api.wsUrl(h.wsCursor ?? 0), h.api.wsProtocols());
     this.ws = ws;
     ws.onopen = () => {
       if (gen !== this.gen) return;
@@ -510,12 +510,11 @@ async function pollHub() {
 
 // ------------------------------------------------------------------ boot
 
-function readHashToken(): string | null {
-  const m = /(?:^#|&)token=([^&]+)/.exec(location.hash);
-  if (!m) return null;
-  const token = decodeURIComponent(m[1]);
+function readPairCode(): string | null {
+  if (!location.hash.startsWith("#pair=")) return null;
+  const params = new URLSearchParams(location.hash.slice(1));
   history.replaceState(null, "", location.pathname + location.search);
-  return token;
+  return params.get("pair") ?? "";
 }
 
 /** Direct mode: connect to the serving daemon. The token may be empty (tailnet access). */
@@ -552,17 +551,28 @@ let booted = false;
 export async function boot() {
   if (booted) return;
   booted = true;
-  const hashToken = readHashToken();
+  const pairCode = readPairCode();
+  let pairedToken: string | null = null;
+  if (pairCode !== null) {
+    try {
+      const paired = await new Api({ url: location.origin, token: "" }).redeemPair(pairCode);
+      pairedToken = paired.token;
+      lsSet(TOKEN_KEY, pairedToken);
+    } catch (e) {
+      store.mode = "need_token";
+      store.tokenError = (e as Error).message;
+      emit();
+      return;
+    }
+  }
   const hub = await fetchHubHosts();
   if (hub) {
     store.mode = "hub";
     syncHub(hub);
     setInterval(pollHub, 5000);
   } else {
-    // Try the hash/stored token, or none at all (tailnet callers need no token);
-    // the paste-token screen only appears if /api/info answers 401.
-    const token = hashToken ?? lsGet(TOKEN_KEY) ?? "";
-    if (hashToken) lsSet(TOKEN_KEY, hashToken);
+    // Pairing stores a per-device token; tailnet clients intentionally need none.
+    const token = pairedToken ?? lsGet(TOKEN_KEY) ?? "";
     startDirect(token);
   }
   emit();

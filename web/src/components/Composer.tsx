@@ -454,7 +454,7 @@ function QueuePanel({ h, session }: { h: HostState; session: Session }) {
       <div className="queue-head">
         <span>Queued</span>
         <span className="badge">{session.queue.length}</span>
-        <span className="dim">sent in order when the current turn ends</span>
+        <span className="dim">{session.queue_paused ? "paused until you choose how to continue" : "sent in order when the current turn ends"}</span>
       </div>
       {session.queue.map((q, i) => (
         <QueueRow key={q.id} h={h} sid={session.id} q={q} index={i} />

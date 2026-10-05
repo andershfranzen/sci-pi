@@ -4,6 +4,7 @@
 //! echoed back exactly as received (thinking blocks must round-trip unchanged). Other
 //! providers translate from that format on the way out.
 
+use super::diagnostics::Trace;
 use crate::anthropic_auth::{CLAUDE_CODE_VERSION, CLAUDE_SDK_VERSION};
 use super::models::{self, Fast, ModelInfo};
 use anyhow::{anyhow, bail, Context, Result};
@@ -21,6 +22,7 @@ pub enum Delta {
     Text(String),
     Thinking(String),
     ToolStart { id: String, name: String },
+    Diagnostic(Value),
 }
 
 #[derive(Clone, Copy)]
@@ -32,6 +34,7 @@ pub struct Request<'a> {
     pub tools: &'a [Value],
     pub opts: &'a Opts<'a>,
     pub session_id: &'a str,
+    pub phase: &'static str,
 }
 
 #[derive(Clone, Copy)]
@@ -40,6 +43,7 @@ pub struct Opts<'a> {
     pub effort: Option<&'a str>,
     pub fast: Option<&'a Fast>,
     pub max_output: Option<u64>,
+    pub window: Option<u64>,
     pub server_compaction: bool,
     pub thinking_display: Option<&'a str>,
     pub fallbacks: bool,
@@ -57,6 +61,7 @@ impl<'a> Opts<'a> {
             effort,
             fast: if fast { info.fast.as_ref() } else { None },
             max_output: info.max_output,
+            window: info.window,
             server_compaction: info.server_compaction == Some(true),
             thinking_display: info.thinking_display.as_deref(),
             fallbacks: info.fallbacks == Some(true),
@@ -98,10 +103,29 @@ impl Provider {
 }
 
 /// POSTs with retries on rate limits / overload / 5xx (only before any output streamed).
-async fn post_with_retry(builder: impl Fn() -> Result<reqwest::RequestBuilder>) -> Result<reqwest::Response> {
+async fn post_with_retry(
+    builder: impl Fn() -> Result<reqwest::RequestBuilder>,
+    body: &Value,
+    mut trace: Option<&mut Trace<'_>>,
+    attempt_number: &mut usize,
+    rejected: &[&str],
+) -> Result<reqwest::Response> {
     let mut delay = Duration::from_secs(2);
     for attempt in 0.. {
-        let res = builder()?.send().await;
+        *attempt_number += 1;
+        let record = trace.as_mut().map(|trace| trace.start(body, *attempt_number, rejected));
+        let res = match builder() {
+            Ok(builder) => builder.send().await,
+            Err(error) => {
+                if let (Some(trace), Some(record)) = (trace.as_mut(), record) {
+                    trace.finish(record, None);
+                }
+                return Err(error);
+            }
+        };
+        if let (Some(trace), Some(record)) = (trace.as_mut(), record) {
+            trace.finish(record, res.as_ref().ok());
+        }
         match res {
             Ok(r) if r.status().is_success() => return Ok(r),
             Ok(r) => {
@@ -171,26 +195,48 @@ async fn post_optional(
     model: &str,
     mut body: Value,
     builder: impl Fn(&Value) -> Result<reqwest::RequestBuilder>,
+    mut trace: Option<&mut Trace<'_>>,
 ) -> Result<reqwest::Response> {
     let key = (endpoint.to_owned(), model.to_owned());
-    {
+    let mut rejected = {
         let remembered = REJECTED_FIELDS.lock();
-        for field in remembered.get(&key).into_iter().flatten() {
-            remove_optional(&mut body, field);
-        }
+        OPTIONAL_FIELDS.iter().copied()
+            .filter(|field| remembered.get(&key).is_some_and(|fields| fields.contains(field)))
+            .collect::<Vec<_>>()
+    };
+    for field in &rejected {
+        remove_optional(&mut body, field);
     }
+    let mut attempt = 0;
     for _ in 0..=OPTIONAL_FIELDS.len() {
-        match post_with_retry(|| builder(&body)).await {
+        match post_with_retry(|| builder(&body), &body, trace.as_deref_mut(), &mut attempt, &rejected).await {
             Ok(response) => return Ok(response),
             Err(error) => {
                 let Some(field) = rejected_optional(&error.to_string()) else { return Err(error); };
                 if !remove_optional(&mut body, field) { return Err(error); }
                 REJECTED_FIELDS.lock()
                     .entry(key.clone()).or_default().insert(field);
+                rejected.push(field);
             }
         }
     }
     bail!("provider rejected every optional request field for {model}")
+}
+
+/// Once a response stream opens, recovery must not resend or compact the request.
+#[derive(Debug)]
+pub(super) struct StreamFailure(anyhow::Error);
+
+impl std::fmt::Display for StreamFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl std::error::Error for StreamFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.0.as_ref())
+    }
 }
 
 /// Splits a byte stream into server-sent events: `(event name, data)`.
@@ -394,6 +440,8 @@ async fn anthropic(
         body["cache_control"] = json!({ "type": "ephemeral" });
     }
     let url = format!("{}/v1/messages", base_url.trim_end_matches('/'));
+    let route = if proxy { "anthropic_proxy" } else if oauth { "anthropic_oauth" } else { "anthropic_key" };
+    let mut trace = Trace::new(req, route, &url, Some(api_key), on);
     let res = post_optional(&url, req.model, body, |body| {
         let mut betas = vec![];
         if body.get("fallbacks").is_some() {
@@ -407,16 +455,25 @@ async fn anthropic(
         }
         let payload = bytes::Bytes::from(anthropic_payload(body, oauth)?);
         Ok(anthropic_request(http, &url, api_key, proxy, &betas, req.session_id).body(payload))
-    }).await?;
+    }, Some(&mut trace)).await?;
+    read_anthropic_stream(res, oauth, on).await.map_err(|error| StreamFailure(error).into())
+}
+
+async fn read_anthropic_stream(
+    res: reqwest::Response,
+    oauth: bool,
+    on: &mut (dyn FnMut(Delta) + Send),
+) -> Result<Response> {
 
     let mut blocks: Vec<Value> = vec![];
     let mut partial: HashMap<usize, String> = HashMap::new();
     let mut invalid = HashMap::new();
     let mut stop_reason = String::from("end_turn");
     let mut usage = json!({});
+    let mut complete = false;
     let mut sse = Sse::new();
     let mut stream = res.bytes_stream();
-    while let Some(chunk) = stream.next().await {
+    'response: while let Some(chunk) = stream.next().await {
         let chunk = chunk.context("reading model stream")?;
         for (_, data) in sse.push(&chunk) {
             let ev: Value = serde_json::from_str(&data).with_context(|| format!("bad event: {data}"))?;
@@ -487,11 +544,14 @@ async fn anthropic(
                         }
                     }
                 }
+                "message_stop" => { complete = true; break 'response; }
                 "error" => bail!("{}", ev["error"]["message"].as_str().unwrap_or("model stream error")),
                 _ => {}
             }
         }
     }
+    anyhow::ensure!(complete, "Anthropic response stream ended before message_stop");
+    anyhow::ensure!(partial.is_empty(), "Anthropic response stream ended before tool arguments completed");
     blocks.retain(|b| !b.is_null());
     Ok(Response { content: blocks, stop_reason, usage, invalid_inputs: invalid })
 }
@@ -561,10 +621,11 @@ impl Provider {
     /// use on-demand server compaction (a signed block, prompt cache and thinking stay valid);
     /// everything else gets client-side "simple compaction": the model writes a summary that
     /// replaces the history, with no earlier turns or thinking replayed.
-    pub async fn compact(&self, http: &reqwest::Client, req: &Request<'_>) -> Result<Compacted> {
+    pub async fn compact(&self, http: &reqwest::Client, req: &Request<'_>, on: &mut (dyn FnMut(Delta) + Send)) -> Result<Compacted> {
+        let req = &Request { phase: "compaction", ..*req };
         if let Provider::Anthropic { api_key, base_url, proxy } = self {
             if req.opts.server_compaction {
-                return server_compaction(http, api_key, base_url, *proxy, req).await;
+                return server_compaction(http, api_key, base_url, *proxy, req, on).await;
             }
         }
         let mut messages = req.messages.to_vec();
@@ -576,7 +637,9 @@ impl Provider {
             },
             _ => messages.push(json!({ "role": "user", "content": [ask] })),
         }
-        let res = self.stream(http, &Request { messages: &messages, ..*req }, &mut |_| {}).await?;
+        let res = self.stream(http, &Request { messages: &messages, ..*req }, &mut |delta| {
+            if matches!(delta, Delta::Diagnostic(_)) { on(delta); }
+        }).await?;
         let summary: String = res.content.iter().filter(|b| b["type"] == "text").filter_map(|b| b["text"].as_str()).collect();
         if summary.trim().is_empty() {
             bail!("the model returned no summary (stop reason: {})", res.stop_reason);
@@ -587,7 +650,7 @@ impl Provider {
     }
 }
 
-async fn server_compaction(http: &reqwest::Client, api_key: &str, base_url: &str, proxy: bool, req: &Request<'_>) -> Result<Compacted> {
+async fn server_compaction(http: &reqwest::Client, api_key: &str, base_url: &str, proxy: bool, req: &Request<'_>, on: &mut (dyn FnMut(Delta) + Send)) -> Result<Compacted> {
     let oauth = is_anthropic_oauth(api_key);
     let (mut body, _) = anthropic_body(req, proxy, oauth)?;
     // Compaction cannot carry context_management.
@@ -595,12 +658,14 @@ async fn server_compaction(http: &reqwest::Client, api_key: &str, base_url: &str
     body.as_object_mut().unwrap().remove("fallbacks");
     body["compaction"] = json!({ "type": "summarize", "instructions": SUMMARY_INSTRUCTIONS });
     let url = format!("{}/v1/messages", base_url.trim_end_matches('/'));
+    let route = if proxy { "anthropic_proxy" } else if oauth { "anthropic_oauth" } else { "anthropic_key" };
+    let mut trace = Trace::new(req, route, &url, Some(api_key), on);
     let res = post_optional(&url, req.model, body, |body| {
         let mut betas = vec![COMPACTION_BETA];
         if body.get("speed").is_some() { betas.push("fast-mode-2026-02-01"); }
         let payload = bytes::Bytes::from(anthropic_payload(body, oauth)?);
         Ok(anthropic_request(http, &url, api_key, proxy, &betas, req.session_id).body(payload))
-    }).await?;
+    }, Some(&mut trace)).await?;
     let v: Value = res.json().await?;
     if v["stop_reason"] != "compaction" {
         bail!("no summary came back (stop reason: {})", v["stop_reason"].as_str().unwrap_or("?"));
@@ -707,18 +772,26 @@ async fn openai(
         body["max_tokens"] = json!(limit);
     }
     let url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
+    let mut trace = Trace::new(req, "openai", &url, api_key, on);
     let res = post_optional(&url, req.model, body, |body| {
         let b = http.post(&url).json(body);
         Ok(match api_key {
             Some(k) => b.bearer_auth(k),
             None => b,
         })
-    }).await?;
+    }, Some(&mut trace)).await?;
+    read_openai_stream(res, on).await.map_err(|error| StreamFailure(error).into())
+}
+
+async fn read_openai_stream(
+    res: reqwest::Response,
+    on: &mut (dyn FnMut(Delta) + Send),
+) -> Result<Response> {
 
     let mut text = String::new();
     // index → (id, name, arguments)
     let mut calls: Vec<(String, String, String)> = vec![];
-    let mut finish = String::from("stop");
+    let mut finish = None;
     let mut usage = json!({});
     let mut sse = Sse::new();
     let mut stream = res.bytes_stream();
@@ -770,10 +843,11 @@ async fn openai(
                 }
             }
             if let Some(f) = choice["finish_reason"].as_str() {
-                finish = f.to_string();
+                finish = Some(f.to_string());
             }
         }
     }
+    let finish = finish.context("OpenAI response stream ended before finish_reason")?;
     let mut content = vec![];
     if !text.is_empty() {
         content.push(json!({ "type": "text", "text": text }));
@@ -898,7 +972,7 @@ mod tests {
             let mut body = json!({ "model": "runtime-model" });
             body[field] = json!("default");
             for _ in 0..2 {
-                post_optional(&url, "runtime-model", body.clone(), |body| Ok(http.post(&url).json(body))).await.unwrap();
+                post_optional(&url, "runtime-model", body.clone(), |body| Ok(http.post(&url).json(body)), None).await.unwrap();
             }
             let bodies = server.await.unwrap();
             assert!(bodies[0].get(field).is_some());
@@ -940,7 +1014,8 @@ mod tests {
             }
             let event = json!({ "type": "content_block_start", "index": 0,
                 "content_block": { "type": "text", "text": "Cache budget accepted." } });
-            ([("content-type", "text/event-stream")], format!("data: {event}\n\n")).into_response()
+            let stop = json!({ "type": "message_stop" });
+            ([("content-type", "text/event-stream")], format!("data: {event}\n\ndata: {stop}\n\n")).into_response()
         }));
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
         let provider = Provider::Anthropic { api_key: "proxy-key".into(), base_url, proxy: true };
@@ -954,10 +1029,10 @@ mod tests {
         let tools = [json!({ "name": "read_file", "description": "Read a file.",
             "input_schema": { "type": "object", "properties": {} } })];
         let req = Request { model: "runtime-model", system: "Agent instructions.",
-            messages: &messages, tools: &tools, opts: &opts, session_id: "cache-budget-test" };
+            messages: &messages, tools: &tools, opts: &opts, session_id: "cache-budget-test", phase: "inference" };
         let http = reqwest::Client::new();
         let response = provider.stream(&http, &req, &mut |_| {}).await.unwrap();
-        let compacted = provider.compact(&http, &req).await.unwrap();
+        let compacted = provider.compact(&http, &req, &mut |_| {}).await.unwrap();
         server.abort();
         assert_eq!(response.content[0]["text"], "Cache budget accepted.");
         assert_eq!(compacted.summary, "Conversation summarized.");

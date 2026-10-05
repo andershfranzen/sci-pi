@@ -7,6 +7,7 @@
 //! resumes with its full history after the process restarts.
 
 pub mod llm;
+mod diagnostics;
 pub mod models;
 pub mod prompt;
 pub mod tools;
@@ -70,12 +71,44 @@ struct Server {
     /// Provider discovery timestamps and runtime metadata by selectable model ID.
     discovered: Mutex<HashMap<String, std::time::Instant>>,
     registry: Mutex<HashMap<String, ModelInfo>>,
-    learned: Mutex<HashMap<String, u64>>,
+    learned: Mutex<models::LearnedWindows>,
+    endpoint_scopes: HashMap<String, [Option<EndpointScope>; 2]>,
     /// models.dev fallback, indexed by bare model ID.
     catalog: Mutex<HashMap<String, ModelInfo>>,
     discovery: tokio::sync::Mutex<()>,
     dir: PathBuf,
     http: reqwest::Client,
+}
+
+struct EndpointScope {
+    id: String,
+    url: String,
+}
+
+fn endpoint_scopes(native: &NativeConfig) -> HashMap<String, [Option<EndpointScope>; 2]> {
+    use sha2::{Digest, Sha256};
+    let make = |url: String, key: Option<&str>| {
+        let canonical = diagnostics::endpoint(&url)?;
+        let id = format!("{:x}", Sha256::digest(canonical.as_bytes()));
+        let url = if key.filter(|key| !key.is_empty()).is_some_and(|key| canonical.contains(key)) {
+            "[redacted]".into()
+        } else { canonical };
+        Some(EndpointScope { id, url })
+    };
+    let base = std::env::var("ANTHROPIC_BASE_URL").unwrap_or_else(|_| "https://api.anthropic.com".into());
+    let key = config::credential("anthropic", None);
+    let mut scopes = HashMap::from([(String::new(), [make(format!("{}/v1/messages", base.trim_end_matches('/')), key.as_deref()), None])]);
+    for (name, provider) in &native.providers {
+        let base = provider.base_url.trim_end_matches('/');
+        let key = config::credential(name, provider.api_key_env.as_deref());
+        let pair = match provider.kind {
+            ProviderKind::Anthropic => [make(format!("{base}/v1/messages"), key.as_deref()), None],
+            ProviderKind::Openai => [None, make(format!("{base}/chat/completions"), key.as_deref())],
+            ProviderKind::Cliproxy => [make(format!("{base}/v1/messages"), key.as_deref()), make(format!("{base}/v1/chat/completions"), key.as_deref())],
+        };
+        scopes.insert(name.clone(), pair);
+    }
+    scopes
 }
 
 pub async fn serve_stdio() -> Result<()> {
@@ -99,6 +132,7 @@ pub async fn serve_stdio() -> Result<()> {
         pending: Mutex::default(),
         next_id: AtomicU64::new(1),
         sessions: Mutex::default(),
+        endpoint_scopes: endpoint_scopes(&cfg.native),
         native: cfg.native,
         discovered: Mutex::default(),
         registry: Mutex::default(),
@@ -190,7 +224,7 @@ impl Server {
                     "promptCapabilities": { "image": true, "embeddedContext": true },
                     "sessionCapabilities": { "resume": {} },
                 },
-                "agentInfo": { "name": "sci-pi", "title": "sci-pi", "version": env!("CARGO_PKG_VERSION") },
+                "agentInfo": { "name": "sci-pi", "title": "sci-pi", "version": crate::build_info::VERSION, "build": crate::build_info::info() },
                 "authMethods": [],
             })),
             "session/new" => {
@@ -285,7 +319,10 @@ impl Server {
             json!({ "id": "mode", "name": "Mode", "category": "mode", "type": "select", "currentValue": s.mode,
                 "options": MODES.iter().map(|(id, name, d)| json!({ "value": id, "name": name, "description": d })).collect::<Vec<_>>() }),
             json!({ "id": "model", "name": "Model", "category": "model", "type": "select",
-                "currentValue": s.model, "options": choices }),
+                "currentValue": s.model, "options": choices,
+                "metadata": { "info": info, "pay_per_token": self.pay_per_token(&s.model),
+                    "endpoint": self.scope(&s.model).map(|(scope, _)| &scope.url),
+                    "endpoint_id": self.scope(&s.model).map(|(scope, _)| &scope.id) } }),
         ];
         if !info.efforts.is_empty() {
             options.push(json!({ "id": "effort", "name": "Effort", "category": "thought_level",
@@ -392,6 +429,17 @@ impl Server {
         }
     }
 
+    fn scope<'a>(&'a self, model: &'a str) -> Option<(&'a EndpointScope, &'a str)> {
+        let (name, bare) = model.split_once('/').unwrap_or(("", model));
+        let name = if name == "anthropic" && !self.native.providers.contains_key(name) { "" } else { name };
+        let index = match self.native.providers.get(name).map(|provider| provider.kind) {
+            Some(ProviderKind::Openai) => 1,
+            Some(ProviderKind::Cliproxy) if !bare.starts_with("claude-") => 1,
+            _ => 0,
+        };
+        Some((self.endpoint_scopes.get(name)?[index].as_ref()?, bare))
+    }
+
     fn info(&self, model: &str) -> ModelInfo {
         let (_, bare) = model.split_once('/').unwrap_or(("", model));
         let mut info = {
@@ -403,12 +451,17 @@ impl Server {
         }
         if let Some(window) = self.native.context_windows.get(model).copied().filter(|w| *w > 0) {
             info.window = Some(window);
+            info.provenance.insert("window".into(), models::MetadataSource::UserOverride);
         }
-        if let Some(limit) = self.learned.lock().get(model).copied() {
-            info.window = Some(info.window.map_or(limit, |window| window.min(limit)));
+        if let Some(limit) = self.scope(model).and_then(|(scope, bare)| self.learned.lock().get(&scope.id, bare)) {
+            if info.window.is_none_or(|window| limit <= window) {
+                info.window = Some(limit);
+                info.provenance.insert("window".into(), models::MetadataSource::LearnedOverflow);
+            }
         }
         if !self.pay_per_token(model) {
             info.cost = None;
+            info.provenance.retain(|field, _| !field.starts_with("cost."));
         }
         info
     }
@@ -586,10 +639,11 @@ impl Server {
             let message_id = uuid::Uuid::new_v4().to_string();
             let (sid, this, main) = (s.id.clone(), self.clone(), matches!(sink, Sink::Main));
             let mut on = move |d: Delta| {
-                if !main {
-                    return; // a subagent's stream isn't shown; its tool calls and report are
-                }
                 match d {
+                    Delta::Diagnostic(diagnostic) => this.update(&sid, json!({
+                        "sessionUpdate": "request_diagnostic", "diagnostic": diagnostic
+                    })),
+                    _ if !main => {},
                     Delta::Text(t) => this.update(&sid, json!({ "sessionUpdate": "agent_message_chunk", "messageId": message_id, "content": { "type": "text", "text": t } })),
                     Delta::Thinking(t) => this.update(&sid, json!({ "sessionUpdate": "agent_thought_chunk", "messageId": message_id, "content": { "type": "text", "text": t } })),
                     Delta::ToolStart { id, name } => this.update(&sid, json!({
@@ -600,21 +654,27 @@ impl Server {
             };
             let info = self.info(&model);
             let opts = Opts::from_info(&info, &settings.effort, settings.fast);
-            let req = Request { model: &api_model, system, messages: history, tools: tool_defs, opts: &opts, session_id: &s.id };
+            let req = Request { model: &api_model, system, messages: history, tools: tool_defs, opts: &opts, session_id: &s.id, phase: "inference" };
             let resp = tokio::select! {
                 r = provider.stream(&self.http, &req, &mut on) => r,
                 _ = token.cancelled() => return Ok("cancelled"),
             };
             let resp = match resp {
                 Ok(r) => r,
+                Err(e) if e.is::<llm::StreamFailure>() => return Err(e),
                 // The provider's real window is smaller than we thought: remember it, make room, retry once.
                 Err(e) => match llm::overflow(&format!("{e:#}")) {
                     Some(limit) if !overflowed => {
                         overflowed = true;
-                        if let Some(limit) = limit.filter(|limit| *limit > 0) {
+                        if let (Some(limit), Some((scope, bare))) = (limit.filter(|limit| *limit > 0), self.scope(&model)) {
                             let mut learned = self.learned.lock();
-                            learned.entry(model.clone()).and_modify(|known| *known = (*known).min(limit)).or_insert(limit);
-                            models::save_learned(&self.dir.join("learned-windows.json"), &learned);
+                            learned.remember(&scope.id, bare, limit);
+                            if let Err(error) = models::save_learned(&self.dir.join("learned-windows.json"), &learned) {
+                                eprintln!("could not persist learned context limit: {error}");
+                            }
+                            drop(learned);
+                            self.update(&s.id, json!({ "sessionUpdate": "config_option_update",
+                                "configOptions": self.config_options(&s.settings.lock()) }));
                         }
                         if !self.compact(s, history, system, tool_defs, &model, sink, true).await {
                             shrink_old_tool_results(history);
@@ -694,8 +754,12 @@ impl Server {
         let opts = Opts::from_info(&info, &settings.effort, settings.fast);
         let result = async {
             let (provider, api_model) = self.provider(model).await?;
-            let req = Request { model: &api_model, system, messages: history, tools: tool_defs, opts: &opts, session_id: &s.id };
-            provider.compact(&self.http, &req).await
+            let req = Request { model: &api_model, system, messages: history, tools: tool_defs, opts: &opts, session_id: &s.id, phase: "compaction" };
+            provider.compact(&self.http, &req, &mut |delta| {
+                if let Delta::Diagnostic(diagnostic) = delta {
+                    self.update(&s.id, json!({ "sessionUpdate": "request_diagnostic", "diagnostic": diagnostic }));
+                }
+            }).await
         }
         .await;
         match result {

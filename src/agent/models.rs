@@ -32,6 +32,15 @@ pub struct Cost {
     pub cache_write: Option<f64>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MetadataSource {
+    Provider,
+    ModelsDev,
+    UserOverride,
+    LearnedOverflow,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ModelInfo {
     pub name: Option<String>,
@@ -58,32 +67,78 @@ pub struct ModelInfo {
     pub reasoning: Option<bool>,
     /// USD per million tokens.
     pub cost: Option<Cost>,
+    #[serde(default)]
+    pub provenance: HashMap<String, MetadataSource>,
 }
 
 impl ModelInfo {
+    /// Sources describe individual effective facts, including reported negatives.
+    pub fn set_source(&mut self, source: MetadataSource) {
+        self.provenance.clear();
+        macro_rules! known {
+            ($($field:ident),*) => { $(
+                if self.$field.is_some() { self.provenance.insert(stringify!($field).into(), source); }
+            )* };
+        }
+        known!(provider, name, description, window, max_output, default_effort, adaptive_thinking,
+            thinking_display, fallbacks, server_compaction, reasoning);
+        if self.efforts_known || !self.efforts.is_empty() {
+            self.provenance.insert("efforts".into(), source);
+        }
+        if self.fast_known || self.fast.is_some() {
+            self.provenance.insert("fast".into(), source);
+        }
+        if let Some(cost) = &self.cost {
+            for (field, rate) in [("input", cost.input), ("output", cost.output),
+                ("cache_read", cost.cache_read), ("cache_write", cost.cache_write)] {
+                if rate.is_some() { self.provenance.insert(format!("cost.{field}"), source); }
+            }
+        }
+    }
+
+    fn inherit_source(&mut self, other: &ModelInfo, field: &str) {
+        if let Some(source) = other.provenance.get(field) {
+            self.provenance.insert(field.to_owned(), *source);
+        }
+    }
+
     /// Fills whatever this one doesn't know yet from a less authoritative source.
     pub fn fill_from(&mut self, other: &ModelInfo) {
         macro_rules! fill {
-            ($($f:ident),*) => { $( if self.$f.is_none() { self.$f = other.$f.clone(); } )* };
+            ($($f:ident),*) => { $( if self.$f.is_none() {
+                self.$f = other.$f.clone();
+                self.inherit_source(other, stringify!($f));
+            } )* };
         }
         fill!(provider, name, description, window, max_output, adaptive_thinking, server_compaction, reasoning, thinking_display, fallbacks);
         if let Some(other_cost) = &other.cost {
-            let c = self.cost.get_or_insert_with(Cost::default);
-            c.input = c.input.or(other_cost.input);
-            c.output = c.output.or(other_cost.output);
-            c.cache_read = c.cache_read.or(other_cost.cache_read);
-            c.cache_write = c.cache_write.or(other_cost.cache_write);
+            let mut cost = self.cost.take().unwrap_or_default();
+            for (field, target, rate) in [
+                ("cost.input", &mut cost.input, other_cost.input),
+                ("cost.output", &mut cost.output, other_cost.output),
+                ("cost.cache_read", &mut cost.cache_read, other_cost.cache_read),
+                ("cost.cache_write", &mut cost.cache_write, other_cost.cache_write),
+            ] {
+                if target.is_none() {
+                    *target = rate;
+                    self.inherit_source(other, field);
+                }
+            }
+            self.cost = Some(cost);
         }
         if !self.efforts_known && self.efforts.is_empty() {
             self.efforts = other.efforts.clone();
             self.efforts_known = other.efforts_known;
+            self.inherit_source(other, "efforts");
             if self.default_effort.is_none() {
                 self.default_effort = other.default_effort.clone();
+                self.inherit_source(other, "default_effort");
             }
         }
         if !self.fast_known && self.fast.is_none() {
             self.fast = other.fast.clone();
             self.fast_known = other.fast_known;
+            self.inherit_source(other, "fast");
         }
     }
 
@@ -260,6 +315,7 @@ fn parse_info(m: &Value) -> ModelInfo {
             info.fast = fast.iter().any(|v| supported(v) == Some(true)).then_some(Fast::AnthropicSpeed);
         }
     }
+    info.set_source(MetadataSource::Provider);
     info
 }
 
@@ -305,7 +361,11 @@ const CATALOG_PRIORITY: &[&str] = &["anthropic", "openai", "google", "mistral", 
 /// models.dev: bare model id → what it knows. Cached on disk for a day; a stale cache is used
 /// when the catalog can't be fetched.
 pub async fn models_dev(http: &reqwest::Client, cache: &Path) -> HashMap<String, ModelInfo> {
-    let read = || std::fs::read(cache).ok().and_then(|b| serde_json::from_slice::<HashMap<String, ModelInfo>>(&b).ok());
+    let read = || {
+        let mut map: HashMap<String, ModelInfo> = serde_json::from_slice(&std::fs::read(cache).ok()?).ok()?;
+        for info in map.values_mut() { info.set_source(MetadataSource::ModelsDev); }
+        Some(map)
+    };
     let fresh = std::fs::metadata(cache)
         .ok()
         .and_then(|m| m.modified().ok())
@@ -331,6 +391,7 @@ pub async fn models_dev(http: &reqwest::Client, cache: &Path) -> HashMap<String,
                 }
                 let mut info = parse_info(m);
                 info.provider = Some(provider.to_string());
+                info.set_source(MetadataSource::ModelsDev);
                 map.insert(id.clone(), info);
             }
         }
@@ -348,15 +409,36 @@ pub async fn models_dev(http: &reqwest::Client, cache: &Path) -> HashMap<String,
     }
 }
 
-/// Context windows learned from overflow errors, persisted so each limit is learned once.
-pub fn load_learned(path: &Path) -> HashMap<String, u64> {
-    std::fs::read(path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+/// Limits are scoped to the sanitized request endpoint and bare model ID.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct LearnedWindows {
+    version: u8,
+    windows: HashMap<String, HashMap<String, u64>>,
 }
 
-pub fn save_learned(path: &Path, learned: &HashMap<String, u64>) {
-    if let Ok(bytes) = serde_json::to_vec(learned) {
-        let _ = atomic_write(path, &bytes);
+impl Default for LearnedWindows {
+    fn default() -> Self { Self { version: 2, windows: HashMap::new() } }
+}
+
+impl LearnedWindows {
+    pub fn get(&self, endpoint: &str, model: &str) -> Option<u64> {
+        self.windows.get(endpoint)?.get(model).copied()
     }
+
+    pub fn remember(&mut self, endpoint: &str, model: &str, limit: u64) {
+        self.windows.entry(endpoint.to_owned()).or_default().entry(model.to_owned())
+            .and_modify(|known| *known = (*known).min(limit)).or_insert(limit);
+    }
+}
+
+pub fn load_learned(path: &Path) -> LearnedWindows {
+    // Old model-only limits cannot be assigned to an endpoint safely.
+    std::fs::read(path).ok().and_then(|b| serde_json::from_slice::<LearnedWindows>(&b).ok())
+        .filter(|learned| learned.version == 2).unwrap_or_default()
+}
+
+pub fn save_learned(path: &Path, learned: &LearnedWindows) -> std::io::Result<()> {
+    atomic_write(path, &serde_json::to_vec(learned)?)
 }
 
 /// Price of one response, unknown if any used token category has no reported rate.
@@ -405,6 +487,51 @@ pub fn option(value: &str, info: &ModelInfo, fallback_name: &str) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn provenance_tracks_effective_facts_without_overwriting_provider_negatives() {
+        let mut provider = parse_info(&json!({ "context_window": 8192, "adaptive_thinking": false,
+            "efforts": [], "service_tiers": [], "cost": { "input": 1.5 } }));
+        let mut fallback = parse_info(&json!({ "context_window": 32768, "max_output_tokens": 2048,
+            "adaptive_thinking": true, "efforts": ["custom"], "default_effort": "custom",
+            "cost": { "input": 9.0, "output": 3.0 } }));
+        fallback.set_source(MetadataSource::ModelsDev);
+        provider.fill_from(&fallback);
+        assert_eq!(provider.window, Some(8192));
+        assert_eq!(provider.adaptive_thinking, Some(false));
+        assert!(provider.efforts.is_empty());
+        assert_eq!(provider.default_effort, None);
+        assert_eq!(provider.provenance["window"], MetadataSource::Provider);
+        assert_eq!(provider.provenance["adaptive_thinking"], MetadataSource::Provider);
+        assert_eq!(provider.provenance["efforts"], MetadataSource::Provider);
+        assert_eq!(provider.max_output, Some(2048));
+        assert_eq!(provider.provenance["max_output"], MetadataSource::ModelsDev);
+        assert_eq!(provider.cost.as_ref().unwrap().input, Some(1.5));
+        assert_eq!(provider.provenance["cost.input"], MetadataSource::Provider);
+        assert_eq!(provider.cost.as_ref().unwrap().output, Some(3.0));
+        assert_eq!(provider.provenance["cost.output"], MetadataSource::ModelsDev);
+    }
+
+    #[test]
+    fn learned_windows_are_isolated_by_endpoint_and_model_across_restarts() {
+        struct Cleanup(std::path::PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) { let _ = std::fs::remove_file(&self.0); }
+        }
+        let path = std::env::temp_dir().join(format!("scipi-learned-{}.json", uuid::Uuid::new_v4()));
+        let _cleanup = Cleanup(path.clone());
+        std::fs::write(&path, br#"{"provider/runtime-model":1024}"#).unwrap();
+        let mut learned = load_learned(&path);
+        assert_eq!(learned.get("endpoint-a", "runtime-model"), None);
+        learned.remember("endpoint-a", "runtime-model", 8192);
+        learned.remember("endpoint-a", "runtime-model", 4096);
+        learned.remember("endpoint-a", "runtime-model", 16384);
+        save_learned(&path, &learned).unwrap();
+        let reloaded = load_learned(&path);
+        assert_eq!(reloaded.get("endpoint-a", "runtime-model"), Some(4096));
+        assert_eq!(reloaded.get("endpoint-b", "runtime-model"), None);
+        assert_eq!(reloaded.get("endpoint-a", "other-model"), None);
+    }
 
     #[test]
     fn explicit_capability_negatives_block_fallback() {

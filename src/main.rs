@@ -1,6 +1,8 @@
 mod acp;
 mod agent;
 mod anthropic_auth;
+mod auth;
+mod build_info;
 mod config;
 mod git;
 mod hub;
@@ -17,7 +19,7 @@ use clap::{Parser, Subcommand};
 
 /// Remote-first coding agents: run them on your machines, drive them from anywhere.
 #[derive(Parser)]
-#[command(version)]
+#[command(version = crate::build_info::VERSION)]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
@@ -60,6 +62,13 @@ enum Cmd {
     Hosts,
     /// Print this machine's daemon token.
     Token,
+    /// Pair a local browser with a separately revocable device credential.
+    Pair {
+        #[arg(long, default_value = "Browser")]
+        name: String,
+        #[arg(long)]
+        no_open: bool,
+    },
     /// Check agents, Tailscale and config on this machine.
     Doctor,
     /// Run sci-pi's own agent as an ACP server on stdio (the daemon does this; so can editors).
@@ -74,13 +83,19 @@ enum Cmd {
     #[command(hide = true)]
     Busy,
     #[command(hide = true)]
+    DeploymentCheck,
+    #[command(hide = true)]
     TailscaleAllow { login: String },
 }
 
 #[derive(Subcommand)]
 enum ServiceCmd {
     /// Install (or upgrade to) this binary as a systemd user service and (re)start it.
-    Install,
+    Install {
+        /// Reinstall even when turns are active (they will be interrupted).
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -109,8 +124,9 @@ async fn main() -> Result<()> {
         Cmd::Ui { port, no_open } => hub::run(port, !no_open).await,
         Cmd::Add { target, name, force } => remote::add(&target, name, force).await,
         Cmd::Update { force } => remote::update_all(force).await,
-        Cmd::Service { cmd: ServiceCmd::Install } => remote::install_local().await,
+        Cmd::Service { cmd: ServiceCmd::Install { force } } => remote::install_local(force).await,
         Cmd::Busy => remote::busy().await,
+        Cmd::DeploymentCheck => remote::deployment_check().await,
         Cmd::Hosts => {
             for (name, h) in config::Hosts::load()?.hosts {
                 let via = h.tailnet_url.as_deref().unwrap_or("ssh tunnel");
@@ -122,6 +138,7 @@ async fn main() -> Result<()> {
             println!("{}", config::token()?);
             Ok(())
         }
+        Cmd::Pair { name, no_open } => server::pair(&name, !no_open).await,
         Cmd::Doctor => doctor().await,
         Cmd::Acp => agent::serve_stdio().await,
         Cmd::Auth { cmd: AuthCmd::Login { provider } } => {

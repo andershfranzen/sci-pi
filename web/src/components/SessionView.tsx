@@ -6,6 +6,8 @@ import type { SessionTab } from "../router";
 import { navigate, sessionHash } from "../router";
 import { basename, cx, fmtCost, fmtTokens, tildify } from "../util";
 import { Timeline } from "./Timeline";
+import { DiagnosticsButton } from "./Diagnostics";
+import { RecoveryBanner } from "./RecoveryBanner";
 import { DiffView } from "./DiffView";
 import { Composer } from "./Composer";
 import { StatusPill } from "./Status";
@@ -104,8 +106,9 @@ export function SessionView({
             </span>
           )}
           <UsageMeter session={session} />
+          <DiagnosticsButton session={session} events={log?.events ?? []} />
         </div>
-        {session.status_message && (session.status === "error" || session.status === "detached") && (
+        {(!session.recovery || session.recovery.outcome === "completed") && session.status_message && (session.status === "error" || session.status === "detached") && (
           <div className={cx("sh-banner", session.status === "error" && "error")}>{session.status_message}</div>
         )}
         <nav className="tabs" role="tablist">
@@ -122,6 +125,7 @@ export function SessionView({
           ))}
         </nav>
       </header>
+      <RecoveryBanner h={h} session={session} />
 
       {tab === "chat" && (
         <>

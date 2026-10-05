@@ -1,0 +1,8 @@
+.device-settings { display: grid; gap: 20px; }
+.device-settings section { display: grid; gap: 10px; border-top: 1px solid var(--border); padding-top: 16px; }
+.device-settings h3, .device-settings p { margin: 0; }
+.device-list { list-style: none; padding: 0; margin: 0; display: grid; gap: 12px; }
+.device-list li { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+.device-settings input { width: 100%; }
+.pair-result { display: grid; gap: 8px; }
+.pair-result input { font-family: var(--mono); }

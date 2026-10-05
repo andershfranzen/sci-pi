@@ -220,15 +220,30 @@ pub fn write_private(path: &std::path::Path, contents: &str) -> Result<()> {
 
 /// The daemon's bearer token, generated on first use.
 pub fn token() -> Result<String> {
-    let path = config_dir().join("token");
-    if let Ok(t) = std::fs::read_to_string(&path) {
-        let t = t.trim().to_string();
-        if !t.is_empty() {
+    token_at(&config_dir().join("token"))
+}
+
+fn token_at(path: &std::path::Path) -> Result<String> {
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    match std::fs::read_to_string(path) {
+        Ok(t) => {
+            let t = t.trim().to_string();
+            anyhow::ensure!(!t.is_empty(), "daemon token file is empty");
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
             return Ok(t);
         }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e.into()),
     }
+    if let Some(parent) = path.parent() { std::fs::create_dir_all(parent)?; }
+    let mut file = match std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return token_at(path),
+        Err(e) => return Err(e.into()),
+    };
     let t = format!("{}{}", uuid::Uuid::new_v4().simple(), uuid::Uuid::new_v4().simple());
-    write_private(&path, &t)?;
+    std::io::Write::write_all(&mut file, t.as_bytes())?;
+    file.sync_all()?;
     Ok(t)
 }
 
@@ -316,4 +331,23 @@ pub fn credential(provider: &str, env_var: Option<&str>) -> Option<String> {
 
 pub fn credential_providers() -> Vec<String> {
     load_credentials().into_keys().collect()
+}
+
+#[cfg(test)]
+mod token_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn hardens_existing_token_without_rotation() {
+        let dir = std::env::temp_dir().join(format!("sci-pi-token-{}", uuid::Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("token");
+        std::fs::write(&path, "existing-secret\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(token_at(&path).unwrap(), "existing-secret");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "existing-secret\n");
+        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 }

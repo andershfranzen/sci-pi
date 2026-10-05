@@ -1,11 +1,13 @@
 //! The daemon's HTTP + WebSocket API (docs/PROTOCOL.md) and the embedded web UI.
 
+use crate::auth::{self as device_auth, Devices, Identity};
 use crate::config::{self, expand_tilde, Config};
 use crate::model::WsMsg;
 use crate::session::{CreateReq, Manager, PatchReq, PromptReq};
 use crate::store::Store;
 use crate::tailscale::{self, Gate};
-use anyhow::Result;
+use base64::Engine;
+use anyhow::{Context, Result};
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{ConnectInfo, Path, Query, Request, State};
 use axum::http::{header, HeaderMap, StatusCode, Uri};
@@ -16,7 +18,8 @@ use axum::{Extension, Json, Router};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::net::SocketAddr;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+use parking_lot::RwLock;
 use std::time::Duration;
 use tower_http::cors::{Any, CorsLayer};
 use axum::http::Method;
@@ -29,6 +32,7 @@ pub struct Assets;
 struct AppState {
     mgr: Arc<Manager>,
     token: Arc<str>,
+    devices: Arc<Devices>,
     tailnet: Arc<RwLock<Option<Tailnet>>>,
 }
 
@@ -50,7 +54,8 @@ pub async fn serve() -> Result<()> {
     let token: Arc<str> = config::token()?.into();
     let mgr = Manager::new(cfg.clone(), store, &data_dir)?;
     mgr.resume_queues();
-    let state = AppState { mgr, token, tailnet: Arc::default() };
+    let devices = Arc::new(Devices::open(config::config_dir().join("devices.json"))?);
+    let state = AppState { mgr, token, devices, tailnet: Arc::default() };
     let app = router(state.clone());
 
     let listener = match tokio::net::TcpListener::bind(&cfg.bind).await {
@@ -120,7 +125,7 @@ async fn tailnet_listeners(cfg: Config, app: Router, slot: Arc<RwLock<Option<Tai
             "tailnet: this node is tagged and tailscale.allow is empty, so tailnet callers need the token"
         );
     }
-    *slot.write().unwrap() = Some(Tailnet { url: url.clone(), gate });
+    *slot.write() = Some(Tailnet { url: url.clone(), gate });
     tracing::info!("tailnet: {url}");
 
     for ip in node.ips {
@@ -157,6 +162,10 @@ async fn tailnet_listeners(cfg: Config, app: Router, slot: Arc<RwLock<Option<Tai
 fn router(state: AppState) -> Router {
     let api = Router::new()
         .route("/info", get(info))
+        .route("/auth/me", get(auth_me).delete(revoke_self))
+        .route("/auth/devices", get(device_list))
+        .route("/auth/devices/{id}", axum::routing::delete(device_revoke))
+        .route("/auth/pair", post(pair_issue))
         .route("/sessions", get(list_sessions).post(create_session))
         .route("/sessions/{id}", get(get_session).delete(delete_session).patch(patch_session))
         .route("/sessions/{id}/config", post(set_config))
@@ -176,6 +185,8 @@ fn router(state: AppState) -> Router {
         .route("/sessions/{id}/prompt", post(prompt))
         .route("/sessions/{id}/cancel", post(cancel))
         .route("/sessions/{id}/permission", post(permission))
+        .route("/sessions/{id}/retry", post(retry))
+        .route("/sessions/{id}/resume", post(resume))
         .route("/sessions/{id}/mode", post(set_mode))
         .route("/sessions/{id}/stop", post(stop))
         .route("/sessions/{id}/diff", get(diff))
@@ -183,7 +194,8 @@ fn router(state: AppState) -> Router {
         .route("/fs/list", get(fs_list))
         .route("/ws", get(ws))
         .layer(middleware::from_fn_with_state(state.clone(), auth))
-        .route("/ping", get(ping));
+        .route("/ping", get(ping))
+        .route("/auth/redeem", post(pair_redeem));
     Router::new()
         .nest("/api", api)
         .fallback(static_asset)
@@ -208,25 +220,138 @@ async fn auth(
     mut req: Request,
     next: Next,
 ) -> Response {
-    let bearer = headers
-        .get(header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .map(str::to_string);
-    let query_token = uri.query().and_then(|q| {
-        q.split('&').find_map(|kv| kv.strip_prefix("token=")).map(str::to_string)
-    });
-    let token_ok = [bearer, query_token].into_iter().flatten().any(|t| !t.is_empty() && *t == *st.token);
-    let gate = st.tailnet.read().unwrap().as_ref().map(|t| t.gate.clone());
-    let viewer = match gate {
-        Some(gate) => gate.check(peer).await,
+    let bearer = headers.get(header::AUTHORIZATION).and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "));
+    // Browser WebSockets cannot set Authorization; use subprotocol headers, not secret URLs.
+    let socket_encoded = headers.get(header::SEC_WEBSOCKET_PROTOCOL).and_then(|v| v.to_str().ok())
+        .and_then(|v| v.split(',').map(str::trim).find_map(|p| p.strip_prefix("bearer.")));
+    let socket_token = socket_encoded.and_then(|encoded| base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(encoded).ok())
+        .and_then(|bytes| String::from_utf8(bytes).ok());
+    if uri.query().is_some_and(|q| q.split('&').any(|kv| kv.split('=').next() == Some("token"))) {
+        return auth_error(StatusCode::UNAUTHORIZED, "URL credentials are not supported");
+    }
+    let supplied = bearer.or(socket_token.as_deref());
+    let identity = match supplied {
+        Some(t) if !t.is_empty() && t == st.token.as_ref() => Some(Identity::admin()),
+        Some(t) => st.devices.authenticate(t),
         None => None,
     };
-    if !token_ok && viewer.is_none() {
-        return (StatusCode::UNAUTHORIZED, Json(json!({ "error": "unauthorized" }))).into_response();
+    // An explicitly supplied but invalid credential must not fall back to tailnet access.
+    if (supplied.is_some() || headers.contains_key(header::AUTHORIZATION) || socket_encoded.is_some()) && identity.is_none() {
+        return auth_error(StatusCode::UNAUTHORIZED, "unauthorized");
     }
+    let gate = st.tailnet.read().as_ref().map(|t| t.gate.clone());
+    let viewer = match gate {
+        Some(gate) if identity.is_none() => gate.check(peer).await,
+        _ => None,
+    };
+    let Some(identity) = identity.or_else(|| viewer.as_ref().map(|_| Identity::tailnet())) else {
+        return auth_error(StatusCode::UNAUTHORIZED, "unauthorized");
+    };
     req.extensions_mut().insert(Viewer(viewer));
+    req.extensions_mut().insert(identity);
     next.run(req).await
+}
+
+fn auth_error(status: StatusCode, message: &str) -> Response {
+    (status, Json(json!({ "error": message }))).into_response()
+}
+
+async fn auth_me(Extension(who): Extension<Identity>) -> Json<Value> {
+    Json(json!({ "admin": who.admin, "device_id": who.device_id }))
+}
+
+async fn device_list(State(st): State<AppState>, Extension(who): Extension<Identity>) -> Response {
+    if !who.admin { return auth_error(StatusCode::FORBIDDEN, "administrator credential required"); }
+    Json(st.devices.list()).into_response()
+}
+
+async fn device_revoke(State(st): State<AppState>, Extension(who): Extension<Identity>, Path(id): Path<String>) -> Response {
+    if !who.admin { return auth_error(StatusCode::FORBIDDEN, "administrator credential required"); }
+    match st.devices.revoke(&id) {
+        Ok(true) => Json(json!({})).into_response(),
+        Ok(false) => auth_error(StatusCode::NOT_FOUND, "no such device"),
+        Err(e) => ApiError(e).into_response(),
+    }
+}
+
+async fn revoke_self(State(st): State<AppState>, Extension(who): Extension<Identity>) -> Response {
+    let Some(id) = who.device_id else { return auth_error(StatusCode::FORBIDDEN, "only device credentials can revoke themselves"); };
+    match st.devices.revoke(&id) {
+        Ok(_) => Json(json!({})).into_response(),
+        Err(e) => ApiError(e).into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct PairIssue { #[serde(default)] name: String }
+
+async fn pair_issue(
+    State(st): State<AppState>, Extension(who): Extension<Identity>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>, headers: HeaderMap, Json(req): Json<PairIssue>,
+) -> Response {
+    if !who.admin { return auth_error(StatusCode::FORBIDDEN, "administrator credential required"); }
+    let base = match device_auth::local_origin(peer, &headers, false) {
+        Ok(base) => base,
+        Err(_) => return auth_error(StatusCode::FORBIDDEN, "pairing requires a local loopback origin"),
+    };
+    match st.devices.issue(req.name, device_auth::now()) {
+        Ok((code, expires_at)) => (
+            [(header::CACHE_CONTROL, "no-store")],
+            Json(json!({ "url": format!("{base}/#pair={code}"), "expires_at": expires_at })),
+        ).into_response(),
+        Err(e) => ApiError(e).into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct PairRedeem { code: String }
+
+async fn pair_redeem(
+    State(st): State<AppState>, ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap, Json(req): Json<PairRedeem>,
+) -> Response {
+    if device_auth::local_origin(peer, &headers, true).is_err() {
+        return auth_error(StatusCode::FORBIDDEN, "pairing requires a local loopback origin");
+    }
+    match st.devices.redeem(&req.code, device_auth::now()) {
+        Ok((token, device)) => (
+            [(header::CACHE_CONTROL, "no-store")],
+            Json(json!({ "token": token, "device": device.public() })),
+        ).into_response(),
+        Err(_) => auth_error(StatusCode::UNAUTHORIZED, "pairing code is invalid, expired, or already used"),
+    }
+}
+
+/// The master credential bootstraps pairing but is never embedded in the browser URL.
+pub async fn pair(name: &str, open: bool) -> Result<()> {
+    let cfg = Config::load_or_init()?;
+    let addr: SocketAddr = cfg.bind.parse().context("daemon bind must be an IP address and port for local pairing")?;
+    anyhow::ensure!(addr.ip().is_loopback() || addr.ip().is_unspecified(), "pairing needs a loopback daemon listener");
+    let host = if addr.is_ipv6() { "[::1]" } else { "127.0.0.1" };
+    let base = format!("http://{host}:{}", addr.port());
+    let response = reqwest::Client::builder().no_proxy().timeout(Duration::from_secs(10)).build()?
+        .post(format!("{base}/api/auth/pair")).bearer_auth(config::token()?)
+        .json(&json!({ "name": name })).send().await?;
+    anyhow::ensure!(response.status().is_success(), "local daemon refused pairing (HTTP {})", response.status());
+    let value: Value = response.json().await?;
+    let url = value["url"].as_str().context("daemon returned no pairing URL")?;
+    let parsed = reqwest::Url::parse(url)?;
+    anyhow::ensure!(parsed.origin().ascii_serialization() == base, "daemon returned a nonlocal pairing URL");
+    println!("Open within {} seconds:\n{url}", device_auth::PAIR_TTL);
+    if open {
+        let _ = std::process::Command::new("xdg-open").arg(url)
+            .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn();
+    }
+    Ok(())
+}
+
+async fn retry(State(st): State<AppState>, Path(id): Path<String>) -> ApiResult {
+    Ok(Json(serde_json::to_value(st.mgr.retry(&id)?)?))
+}
+
+async fn resume(State(st): State<AppState>, Path(id): Path<String>) -> ApiResult {
+    Ok(Json(serde_json::to_value(st.mgr.resume(&id)?)?))
 }
 
 struct ApiError(anyhow::Error);
@@ -254,10 +379,11 @@ fn hostname() -> String {
 }
 
 async fn ping(State(st): State<AppState>) -> Json<Value> {
-    let tailnet_url = st.tailnet.read().unwrap().as_ref().map(|t| t.url.clone());
+    let tailnet_url = st.tailnet.read().as_ref().map(|t| t.url.clone());
     Json(json!({
         "scipi": true,
         "version": env!("CARGO_PKG_VERSION"),
+        "build": crate::build_info::info(),
         "host": hostname(),
         "tailnet_url": tailnet_url,
     }))
@@ -268,10 +394,11 @@ async fn info(State(st): State<AppState>, Extension(viewer): Extension<Viewer>) 
     let mut agents: Vec<(&String, &crate::config::AgentSpec)> = st.mgr.cfg.agents.iter().collect();
     agents.sort_by_key(|(id, _)| id.as_str() != crate::config::NATIVE_AGENT);
     let agents: Vec<Value> = agents.into_iter().map(|(id, a)| json!({ "id": id, "name": a.name })).collect();
-    let tailnet_url = st.tailnet.read().unwrap().as_ref().map(|t| t.url.clone());
+    let tailnet_url = st.tailnet.read().as_ref().map(|t| t.url.clone());
     Ok(Json(json!({
         "host": hostname(),
         "version": env!("CARGO_PKG_VERSION"),
+        "build": crate::build_info::info(),
         "home": dirs::home_dir().map(|h| h.to_string_lossy().into_owned()),
         "agents": agents,
         "last_event_id": st.mgr.store.last_event_id()?,
@@ -504,12 +631,22 @@ async fn attachment(State(st): State<AppState>, Path(name): Path<String>) -> Res
     }
 }
 
-async fn terminal_ws(State(st): State<AppState>, Path(id): Path<String>, upgrade: WebSocketUpgrade) -> Response {
+async fn terminal_ws(State(st): State<AppState>, Extension(who): Extension<Identity>, Path(id): Path<String>, upgrade: WebSocketUpgrade) -> Response {
     let term = match st.mgr.terminal(&id) {
         Ok(t) => t,
         Err(e) => return ApiError(e).into_response(),
     };
-    upgrade.on_upgrade(move |mut socket| async move {
+    upgrade.protocols(["sci-pi"]).on_upgrade(move |mut socket| async move {
+        tokio::select! {
+            biased;
+            _ = who.revoked.cancelled() => {}
+            _ = terminal_stream(&term, &mut socket) => {}
+        }
+        let _ = tokio::time::timeout(Duration::from_secs(1), socket.send(Message::Close(None))).await;
+    })
+}
+
+async fn terminal_stream(term: &crate::terminal::Terminal, socket: &mut WebSocket) {
         let (scrollback, mut live) = term.attach();
         if socket.send(Message::Binary(scrollback.into())).await.is_err() {
             return;
@@ -540,7 +677,6 @@ async fn terminal_ws(State(st): State<AppState>, Path(id): Path<String>, upgrade
                 },
             }
         }
-    })
 }
 
 async fn terminal_kill(State(st): State<AppState>, Path(id): Path<String>) -> ApiResult {
@@ -625,17 +761,22 @@ async fn fs_list(Query(q): Query<FsQuery>) -> ApiResult {
     })))
 }
 
-async fn ws(State(st): State<AppState>, Query(q): Query<After>, upgrade: WebSocketUpgrade) -> Response {
-    upgrade.on_upgrade(move |socket| async move {
-        if let Err(e) = stream_events(st, socket, q.after.unwrap_or(0)).await {
-            tracing::debug!("websocket closed: {e:#}");
+async fn ws(State(st): State<AppState>, Extension(who): Extension<Identity>, Query(q): Query<After>, upgrade: WebSocketUpgrade) -> Response {
+    upgrade.protocols(["sci-pi"]).on_upgrade(move |mut socket| async move {
+        tokio::select! {
+            biased;
+            _ = who.revoked.cancelled() => {}
+            result = stream_events(st, &mut socket, q.after.unwrap_or(0)) => {
+                if let Err(e) = result { tracing::debug!("websocket closed: {e:#}"); }
+            }
         }
+        let _ = tokio::time::timeout(Duration::from_secs(1), socket.send(Message::Close(None))).await;
     })
 }
 
 /// Replays the log after `after`, then forwards live messages. Subscribing before replaying
 /// (and skipping already-sent ids) means nothing falls in the gap between the two.
-async fn stream_events(st: AppState, mut socket: WebSocket, after: i64) -> Result<()> {
+async fn stream_events(st: AppState, socket: &mut WebSocket, after: i64) -> Result<()> {
     let mut live = st.mgr.tx.subscribe();
     let mut last = after;
     loop {
@@ -695,3 +836,7 @@ pub async fn static_asset(uri: Uri) -> Response {
     let cache = if path.starts_with("assets/") { "public, max-age=31536000, immutable" } else { "no-cache" };
     ([(header::CONTENT_TYPE, mime.as_ref()), (header::CACHE_CONTROL, cache)], file.data).into_response()
 }
+
+#[cfg(test)]
+#[path = "auth_tests.rs"]
+mod auth_tests;
