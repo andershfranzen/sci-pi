@@ -157,8 +157,8 @@ are retained in these diagnostic records. HTTP headers received are not evidence
 turn. The **Model metadata** tab shows each effective value's source: provider, models.dev
 fallback, user override, or an endpoint-and-model-specific learned overflow limit.
 
-Failed, cancelled, and interrupted turns keep partial output and tool effects. An unsuccessful
-turn or daemon restart during a turn pauses queued work; idle Stop does not strand later prompts.
+Failed, cancelled, and interrupted turns keep partial output and tool effects. Failures and
+interruptions pause queued work; cancellation clears it. Idle Stop does not strand later prompts.
 **Resume** starts the adapter and releases the retained queue without repeating the earlier
 prompt. **Retry as new attempt** explicitly resends the original prompt and attachments as a
 new numbered turn. Neither action rolls back files, commands, or external effects; a retry may
