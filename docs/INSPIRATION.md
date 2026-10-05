@@ -1,4 +1,4 @@
-# Inspiration: T3 Code and OMP vs sci-pi
+# Inspiration: T3 Code, OMP and DeepSeek Harness vs sci-pi
 
 Researched 2026-10-04. Requirement: sci-pi must be **at least as good as T3 Code and OMP**.
 
@@ -416,6 +416,53 @@ Notable polish:
 - **Release churn:** several releases a day (v18.x), with crash-on-upgrade incidents (`omp#651`, `omp#116`).
 - **Unsafe default:** the default approval mode is `yolo` (`omp:docs/approval-mode.md`).
 - **No workspace file checkpoints or revert** for the main session: `/branch` and `/tree` rewind the conversation only. This is from a source search and not exhaustively verified.
+
+## Appendix C: DeepSeek Harness web interactions
+
+Source review pinned to
+[`deepseek-ai/deepseek-harness@5badb15009ae1756c3afe0ae0cef1faafc290ccc`](https://github.com/deepseek-ai/deepseek-harness/tree/5badb15009ae1756c3afe0ae0cef1faafc290ccc).
+Reviewed the client workspace documentation, transcript/markdown rendering, composer/history/drafts,
+menus, dialogs, keyboard composition, conversation panes and user-question flows. This was a
+targeted web-source comparison, not a security audit of the entire upstream repository.
+
+**Adopted and adapted**
+
+- [Composition observation](https://github.com/deepseek-ai/deepseek-harness/blob/5badb15009ae1756c3afe0ae0cef1faafc290ccc/packages/client/ui-primitives/src/keyboard-composition.ts)
+  and the bounded recent-composition window in
+  [editor/keymap.ts](https://github.com/deepseek-ai/deepseek-harness/blob/5badb15009ae1756c3afe0ae0cef1faafc290ccc/packages/client/ui-conversation/src/client/input/editor/keymap.ts):
+  protect IME confirmation, including legacy keyCode 229, without swallowing a later ordinary key.
+- [Modal layers](https://github.com/deepseek-ai/deepseek-harness/blob/5badb15009ae1756c3afe0ae0cef1faafc290ccc/packages/client/ui-primitives/src/useModalLayer.ts)
+  and [Menu](https://github.com/deepseek-ai/deepseek-harness/blob/5badb15009ae1756c3afe0ae0cef1faafc290ccc/packages/client/ui-primitives/src/Menu.tsx):
+  shared focus entry/trapping/restoration, nested overlay ownership and portaled keyboard menus.
+- [Message actions](https://github.com/deepseek-ai/deepseek-harness/blob/5badb15009ae1756c3afe0ae0cef1faafc290ccc/packages/client/ui-chat/src/client/chat/MessageIconActions.tsx),
+  [CodeToolbar](https://github.com/deepseek-ai/deepseek-harness/blob/5badb15009ae1756c3afe0ae0cef1faafc290ccc/packages/client/ui-primitives/src/CodeToolbar.tsx)
+  and [TurnNavigator](https://github.com/deepseek-ai/deepseek-harness/blob/5badb15009ae1756c3afe0ae0cef1faafc290ccc/packages/client/ui-chat/src/client/chat/TurnNavigator.tsx):
+  raw message/code copying, selection-aware quoting, wrapping and prompt navigation.
+- [Draft-store lifecycle](https://github.com/deepseek-ai/deepseek-harness/blob/5badb15009ae1756c3afe0ae0cef1faafc290ccc/packages/client/ui-user-questions/src/client/draft-store.ts):
+  persist the complete draft and preserve edits made while acknowledgement is pending. sci-pi
+  uses origin-local IndexedDB Blob storage plus a small metadata journal instead of repeatedly
+  serializing image payloads. Legacy sessionStorage text is imported; storage failures remain visible.
+
+**Kept deliberately different**
+
+- sci-pi already had resize-aware scroll following and file-mention chips. Preserve those;
+  add explicit historical-reading intent, navigation and complete attachment persistence.
+- Keep one Select/Menu/Modal convention, the existing terminal behavior and session/worktree layout.
+  Do not transplant upstream plugins, docking, document previews or highlighting dependencies.
+- Parse complete markdown documents so reference links retain their scope. Keep raw HTML escaped,
+  unsafe URLs inactive and remote images unfetched; code controls render text, not active documents.
+- Full upstream MIT copyright and permission notice are retained in
+  [`web/public/DEEPSEEK-LICENSE`](../web/public/DEEPSEEK-LICENSE), included in the embedded web build.
+
+**Verification:** real Chromium interaction covered view/reload attachment persistence, session-isolated
+drafts, delayed restoration, failed localStorage journals, missing-image discard, send success/failure
+with later edits, history after asynchronous event loading, exact native message/code clipboard output
+and denial feedback, code wrap during streaming, historical scroll stability, prompt focus, jump-to-latest,
+IME form guards, modal/menu focus and a 390px phone picker/layout. Clipboard success required explicitly
+granting Chromium's sanitized-write permission in the automation scope. No paid agent prompts were sent.
+Additional pending-send interaction confirmed remount-safe acknowledgement, duplicate-send suppression,
+remove/re-add file preservation and selection-only quoting with an existing attachment. It also exposed
+and fixed a delayed blur callback incorrectly closing a freshly reopened file picker.
 
 ## Sources
 

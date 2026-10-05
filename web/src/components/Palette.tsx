@@ -5,6 +5,9 @@ import { navigate, sessionHash } from "../router";
 import { requestNotifications } from "../notify";
 import type { SearchHit } from "../types";
 import { cx, fuzzyScore, isMac, modKey, relTime } from "../util";
+import { useCompositionGuard } from "../keyboard";
+import { useModalLayer } from "../overlays";
+import { Modal } from "./Modal";
 import { StatusDot } from "./Status";
 import { IconBell, IconDiff, IconHome, IconInbox, IconKeyboard, IconMessage, IconPlus, IconSearch, IconServer, IconTerminal } from "./Icons";
 
@@ -28,6 +31,9 @@ function Snippet({ text }: { text: string }) {
 }
 
 export function Palette({ route, onClose, onNew, onHelp }: { route: Route; onClose: () => void; onNew: () => void; onHelp: () => void }) {
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const composing = useCompositionGuard();
+  useModalLayer(dialogRef, onClose);
   const [q, setQ] = useState("");
   const [sel, setSel] = useState(0);
   const [hits, setHits] = useState<{ hostKey: string; hit: SearchHit }[]>([]);
@@ -155,15 +161,16 @@ export function Palette({ route, onClose, onNew, onHelp }: { route: Route; onClo
   let lastGroup = "";
   return (
     <div className="modal-backdrop palette-backdrop" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
-      <div className="palette" role="dialog" aria-label="Command palette">
+      <div ref={dialogRef} tabIndex={-1} className="palette" role="dialog" aria-modal="true" aria-label="Command palette">
         <div className="palette-input">
           <IconSearch size={15} />
           <input
-            autoFocus
+            data-modal-autofocus
             value={q}
             placeholder="Search sessions, messages, actions…"
             onChange={(e) => setQ(e.target.value)}
             onKeyDown={(e) => {
+              if (composing(e.nativeEvent)) return;
               if (e.key === "ArrowDown") {
                 e.preventDefault();
                 setSel((s) => Math.min(items.length - 1, s + 1));
@@ -173,8 +180,6 @@ export function Palette({ route, onClose, onNew, onHelp }: { route: Route; onClo
               } else if (e.key === "Enter") {
                 e.preventDefault();
                 items[sel]?.run();
-              } else if (e.key === "Escape") {
-                onClose();
               }
             }}
             aria-label="Command palette search"
@@ -236,18 +241,9 @@ export const SHORTCUTS: { keys: string[][]; sep?: string; note?: string; desc: s
 ];
 
 export function ShortcutsOverlay({ onClose }: { onClose: () => void }) {
-  useEffect(() => {
-    const on = (e: KeyboardEvent) => (e.key === "Escape" || e.key === "?") && onClose();
-    window.addEventListener("keydown", on);
-    return () => window.removeEventListener("keydown", on);
-  }, [onClose]);
   return (
-    <div className="modal-backdrop" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
-      <div className="modal small shortcuts" role="dialog" aria-label="Keyboard shortcuts">
-        <div className="modal-head">
-          <h2>Keyboard shortcuts</h2>
-        </div>
-        <div className="modal-body">
+    <Modal title="Keyboard shortcuts" onClose={onClose} small>
+      <div className="shortcuts">
           <table>
             <tbody>
               {SHORTCUTS.map((sc) => (
@@ -270,8 +266,7 @@ export function ShortcutsOverlay({ onClose }: { onClose: () => void }) {
               ))}
             </tbody>
           </table>
-        </div>
       </div>
-    </div>
+    </Modal>
   );
 }

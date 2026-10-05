@@ -1,5 +1,6 @@
-import { useEffect, type ReactNode } from "react";
+import { useRef, type ReactNode } from "react";
 import { cx } from "../util";
+import { useModalLayer } from "../overlays";
 import { IconX } from "./Icons";
 
 export function Modal({
@@ -15,16 +16,11 @@ export function Modal({
   small?: boolean;
   wide?: boolean;
 }) {
-  useEffect(() => {
-    const on = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    window.addEventListener("keydown", on);
-    return () => window.removeEventListener("keydown", on);
-  }, [onClose]);
+  const ref = useRef<HTMLDivElement>(null);
+  useModalLayer(ref, onClose);
   return (
     <div className="modal-backdrop" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
-      <div className={cx("modal", small && "small", wide && "wide")} role="dialog" aria-modal="true" aria-label={title}>
+      <div ref={ref} tabIndex={-1} className={cx("modal", small && "small", wide && "wide")} role="dialog" aria-modal="true" aria-label={title}>
         <div className="modal-head">
           <h2>{title}</h2>
           <button className="icon-btn" onClick={onClose} aria-label="Close">

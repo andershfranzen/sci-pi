@@ -4,6 +4,7 @@ import { emit, store } from "../store";
 import type { FsList } from "../types";
 import { navigate, sessionHash } from "../router";
 import { cx, tildify } from "../util";
+import { useCompositionGuard } from "../keyboard";
 import { Modal } from "./Modal";
 import { Select } from "./Select";
 import { IconChevron, IconFolder, IconGit } from "./Icons";
@@ -32,6 +33,7 @@ function readLast(hostKey: string): Last {
 }
 
 export function NewSessionDialog({ initialHost, onClose }: { initialHost: HostState; onClose: () => void }) {
+  const composing = useCompositionGuard();
   const [hostKey, setHostKey] = useState(initialHost.key);
   const h = store.hosts.find((x) => x.key === hostKey) ?? initialHost;
   const last = useMemo(() => readLast(h.key), [h.key]);
@@ -89,6 +91,7 @@ export function NewSessionDialog({ initialHost, onClose }: { initialHost: HostSt
     <Modal title="New session" onClose={onClose}>
       <form
         className="form"
+        onKeyDown={(e) => { if (e.key === "Enter" && composing(e.nativeEvent)) e.preventDefault(); }}
         onSubmit={(e) => {
           e.preventDefault();
           void submit();
@@ -166,6 +169,7 @@ export function NewSessionDialog({ initialHost, onClose }: { initialHost: HostSt
             rows={5}
             placeholder="What should the agent do?"
             onKeyDown={(e) => {
+              if (composing(e.nativeEvent)) return;
               if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
                 e.preventDefault();
                 void submit();
@@ -201,6 +205,7 @@ function DirPicker({
   picked: { path: string; isGit: boolean | null } | null;
   onPick: (p: { path: string; isGit: boolean | null }) => void;
 }) {
+  const composing = useCompositionGuard();
   const [list, setList] = useState<FsList | null>(null);
   const [input, setInput] = useState(start);
   const [filter, setFilter] = useState("");
@@ -260,9 +265,11 @@ function DirPicker({
         <IconFolder size={14} />
         <input
           className="mono"
+          data-modal-autofocus
           value={input}
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={(e) => {
+            if (composing(e.nativeEvent)) return;
             if (e.key === "Enter") {
               e.preventDefault();
               void go(input);

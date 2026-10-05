@@ -1,10 +1,11 @@
-import { lazy, Suspense, useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import type { HostState } from "../store";
 import { getTimeline, loadHistory, patchSession, peekLog, store } from "../store";
 import type { Session } from "../types";
 import type { SessionTab } from "../router";
 import { navigate, sessionHash } from "../router";
 import { basename, cx, fmtCost, fmtTokens, tildify } from "../util";
+import { useCompositionGuard } from "../keyboard";
 import { Timeline } from "./Timeline";
 import { DiagnosticsButton } from "./Diagnostics";
 import { RecoveryBanner } from "./RecoveryBanner";
@@ -33,6 +34,10 @@ export function SessionView({
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [renaming, setRenaming] = useState(false);
   const sid = session.id;
+  const quoteSeq = useRef(0);
+  const [quote, setQuote] = useState<{ id: number; text: string } | null>(null);
+  const requestQuote = useCallback((text: string) => setQuote({ id: ++quoteSeq.current, text }), []);
+  const quoteApplied = useCallback((id: number) => setQuote((current) => current?.id === id ? null : current), []);
 
   useEffect(() => {
     void loadHistory(h, sid);
@@ -136,8 +141,9 @@ export function SessionView({
             focusEvent={focusEvent}
             loading={!log?.loaded && (log?.loading ?? true)}
             error={log?.error ?? null}
+            onQuote={requestQuote}
           />
-          <Composer key={`${h.key}:${sid}`} h={h} session={session} busy={busy} />
+          <Composer key={`${h.key}:${sid}`} h={h} session={session} busy={busy} quote={quote} onQuoteApplied={quoteApplied} />
         </>
       )}
       {tab === "diff" && <DiffView h={h} session={session} />}
@@ -153,6 +159,7 @@ export function SessionView({
 }
 
 function RenameInput({ h, session, onDone }: { h: HostState; session: Session; onDone: () => void }) {
+  const composing = useCompositionGuard();
   const [v, setV] = useState(session.title);
   const ref = useRef<HTMLInputElement>(null);
   const done = useRef(false);
@@ -175,6 +182,7 @@ function RenameInput({ h, session, onDone }: { h: HostState; session: Session; o
       onChange={(e) => setV(e.target.value)}
       onBlur={commit}
       onKeyDown={(e) => {
+        if (composing(e.nativeEvent)) return;
         if (e.key === "Enter") commit();
         if (e.key === "Escape") {
           done.current = true;

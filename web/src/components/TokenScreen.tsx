@@ -1,13 +1,16 @@
 import { useState } from "react";
 import { setToken, store } from "../store";
 import { LogoMark } from "./Icons";
+import { useCompositionGuard } from "../keyboard";
 
 export function TokenScreen() {
   const [value, setValue] = useState("");
+  const composing = useCompositionGuard();
   return (
     <div className="token-screen">
       <form
         className="token-card"
+        onKeyDown={(e) => { if (e.key === "Enter" && composing(e.nativeEvent)) e.preventDefault(); }}
         onSubmit={(e) => {
           e.preventDefault();
           setToken(value);

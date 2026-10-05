@@ -2,6 +2,8 @@ import { useCallback, useEffect, useRef, useState, type ReactNode } from "react"
 import { boot, currentHost, getHost, selectHost, sortedSessions, useStore } from "./store";
 import { navigate, sessionHash, useRoute, type SessionTab } from "./router";
 import { isMac } from "./util";
+import { observeComposition } from "./keyboard";
+import { foregroundOverlay } from "./overlays";
 import { Sidebar } from "./components/Sidebar";
 import { SessionView } from "./components/SessionView";
 import { Inbox } from "./components/Inbox";
@@ -38,10 +40,14 @@ export function App() {
   }, [route]);
 
   useEffect(() => {
+    const composition = observeComposition(document);
     let gPending = 0;
     // Capture phase, so these work even while xterm has focus. Exception: on Linux/Windows,
     // Ctrl+K inside the terminal stays readline's kill-line (use the sidebar search button).
     const onCapture = (e: KeyboardEvent) => {
+      if (e.defaultPrevented || composition.guards(e) || e.repeat) return;
+      const overlay = foregroundOverlay(document);
+      if (overlay && overlay.getAttribute("aria-label") !== "Command palette") return;
       const inTerm = !!(e.target as HTMLElement | null)?.closest?.(".xterm");
       if ((isMac ? e.metaKey : e.ctrlKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "k" && !(inTerm && !isMac)) {
         e.preventDefault();
@@ -49,6 +55,7 @@ export function App() {
         setPalette((p) => !p);
         return;
       }
+      if (overlay) return;
       const r = routeRef.current;
       if (e.altKey && !e.metaKey && !e.ctrlKey && r.name === "session") {
         const tabs: Record<string, SessionTab> = { Digit1: "chat", Digit2: "diff", Digit3: "terminal" };
@@ -61,6 +68,7 @@ export function App() {
     };
     window.addEventListener("keydown", onCapture, true);
     const on = (e: KeyboardEvent) => {
+      if (e.defaultPrevented || composition.guards(e) || e.repeat || foregroundOverlay(document)) return;
       const r = routeRef.current;
       if (e.altKey && (e.key === "ArrowUp" || e.key === "ArrowDown")) {
         const h = currentHost();
@@ -75,7 +83,6 @@ export function App() {
         return;
       }
       if (isTyping(e.target) || e.metaKey || e.ctrlKey || e.altKey) return;
-      if (document.querySelector(".modal-backdrop")) return;
       if (e.key === "?") {
         e.preventDefault();
         setHelp(true);
@@ -90,6 +97,7 @@ export function App() {
     };
     window.addEventListener("keydown", on);
     return () => {
+      composition.dispose();
       window.removeEventListener("keydown", on);
       window.removeEventListener("keydown", onCapture, true);
     };

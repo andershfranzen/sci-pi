@@ -3,6 +3,8 @@
 import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { cx, fuzzyScore } from "../util";
+import { useCompositionGuard } from "../keyboard";
+import { focusPastAnchor, useModalLayer } from "../overlays";
 import { IconCheck, IconChevronDown, IconSearch, IconX } from "./Icons";
 
 export interface SelectOption {
@@ -55,6 +57,7 @@ export function Select({
   const [open, setOpen] = useState(false);
   const [sheet, setSheet] = useState(false);
   const triggerRef = useRef<HTMLButtonElement>(null);
+  const composing = useCompositionGuard();
   const id = useId();
   const current = options.find((o) => key(o.value) === key(value));
   const shown = display ?? current?.label ?? (value == null || value === "" ? "—" : String(value));
@@ -83,6 +86,7 @@ export function Select({
         disabled={disabled}
         onClick={() => (open ? close() : openMenu())}
         onKeyDown={(e) => {
+          if (composing(e.nativeEvent)) return;
           if (["ArrowDown", "ArrowUp", "Enter", " "].includes(e.key)) {
             e.preventDefault();
             openMenu();
@@ -145,6 +149,8 @@ function SelectMenu({
   const searchable = options.length > 8;
   const [q, setQ] = useState("");
   const popRef = useRef<HTMLDivElement>(null);
+  const composing = useCompositionGuard();
+  useModalLayer(popRef, () => onClose(), sheet);
   const listRef = useRef<HTMLDivElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
   const typeahead = useRef({ buf: "", t: 0 });
@@ -258,6 +264,7 @@ function SelectMenu({
   }, [active, rows, style, sheet]);
 
   const onKey = (e: KeyboardEvent) => {
+    if (composing(e.nativeEvent)) return;
     const n = filtered.length;
     switch (e.key) {
       case "ArrowDown":
@@ -296,7 +303,11 @@ function SelectMenu({
         onClose();
         return;
       case "Tab":
+        if (sheet) return;
+        e.preventDefault();
+        e.stopPropagation();
         onClose(false);
+        focusPastAnchor(anchor, e.shiftKey, popRef.current);
         return;
     }
     // Type-ahead when there's no search box (or focus is on the list).
@@ -329,6 +340,7 @@ function SelectMenu({
       style={sheet ? undefined : style}
       onKeyDown={onKey}
       role="dialog"
+      aria-modal={sheet || undefined}
       aria-label={label}
     >
       {sheet && (
@@ -363,7 +375,7 @@ function SelectMenu({
           )}
         </div>
       )}
-      <div ref={listRef} className="sel-list" role="listbox" id={`${id}-list`} aria-label={label} aria-activedescendant={activeId} tabIndex={-1}>
+      <div ref={listRef} data-modal-autofocus={sheet || undefined} className="sel-list" role="listbox" id={`${id}-list`} aria-label={label} aria-activedescendant={activeId} tabIndex={-1}>
         {rows.map((r, i) =>
           r.kind === "group" ? (
             <div key={`g${i}`} className="sel-group" role="presentation">

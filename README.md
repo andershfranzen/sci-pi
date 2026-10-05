@@ -63,6 +63,32 @@ Other ACP agents (Claude Code, Codex, OpenCode, oh-my-pi) can be used per sessio
   identifies callers with `whois` – no tokens on your tailnet. The hub discovers every sci-pi
   on it.
 
+## Web interactions
+
+- **Complete drafts:** text, @-mentioned files and image attachments survive conversation/diff
+  switches, session changes and reloads. ArrowUp at the start of a prompt recalls sent history;
+  ArrowDown past the newest recalled prompt restores the original unsent text. Edits and new
+  attachments made while a send is pending are not cleared by its acknowledgement.
+- **Transcript controls:** copy the original message markdown, quote selected text (or the whole
+  message) into the current draft, copy literal code, and toggle code wrapping. Prompt navigation
+  focuses the chosen turn; streaming preserves historical reading until **Jump to latest**.
+- **Keyboard and phone use:** dialogs trap and restore focus; portaled menus support arrows,
+  Home/End, Escape and Tab. Phone pickers use a focus-trapped sheet. IME candidate confirmation
+  does not trigger sending, form submission or overlay shortcuts.
+
+Drafts are **unencrypted browser-origin storage**, scoped by host and session—not by device
+credential. Text/file references use a small localStorage journal; image bytes and complete
+drafts use IndexedDB. They are not synced across devices, and concurrent browser tabs are
+last-writer-wins. Pairing/revocation does not erase local drafts; clear site data on shared
+browsers. Storage failures are visible without disabling editing; unavailable saved images
+can be explicitly discarded. Clipboard actions need browser permission and a secure context
+(HTTPS or loopback); failures offer manual copying rather than pretending to succeed.
+
+These interactions incorporate MIT-licensed patterns from
+[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness); its notice ships at
+[`/DEEPSEEK-LICENSE`](web/public/DEEPSEEK-LICENSE). The source comparison and selected tradeoffs
+are recorded in [docs/INSPIRATION.md](docs/INSPIRATION.md#appendix-c-deepseek-harness-web-interactions).
+
 ## Usage
 
 ```sh

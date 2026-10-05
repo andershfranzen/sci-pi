@@ -7,14 +7,18 @@ import { basename, cx, fuzzyScore, isTouch, readFileBase64 } from "../util";
 import { IconArrowUp, IconAt, IconCheck, IconEdit, IconFile, IconGauge, IconImage, IconShield, IconSparkle, IconTrash, IconX, IconZap } from "./Icons";
 import { Select, type SelectOption } from "./Select";
 import { modelChoices, modelLabel, prettyValueName, toggleInfo, toggleLabel } from "../models";
+import { useCompositionGuard } from "../keyboard";
+import { useComposerDraft, type DraftImage } from "../composerDraft";
+import "./Composer.css";
 
-interface PendingImage {
-  id: string;
-  mime_type: string;
-  data: string;
-  url: string;
-  name: string;
-  size: number;
+function ImagePreview({ image }: { image: DraftImage }) {
+  const [url, setUrl] = useState("");
+  useEffect(() => {
+    const next = URL.createObjectURL(image.blob);
+    setUrl(next);
+    return () => URL.revokeObjectURL(next);
+  }, [image.blob]);
+  return <img src={url || undefined} alt={image.name} />;
 }
 
 type Picker =
@@ -23,18 +27,11 @@ type Picker =
 
 const MAX_IMAGE = 10 * 1024 * 1024;
 
-export function Composer({ h, session, busy }: { h: HostState; session: Session; busy: boolean }) {
-  const draftKey = `sci-pi.draft.${h.key}.${session.id}`;
-  const [text, setText] = useState(() => {
-    try {
-      return sessionStorage.getItem(draftKey) ?? "";
-    } catch {
-      return "";
-    }
-  });
-  const [files, setFiles] = useState<string[]>([]);
-  const [images, setImages] = useState<PendingImage[]>([]);
-  const [sending, setSending] = useState(false);
+export function Composer({ h, session, busy, quote, onQuoteApplied }: { h: HostState; session: Session; busy: boolean; quote: { id: number; text: string } | null; onQuoteApplied: (id: number) => void }) {
+  const { text, files, images, unavailableImages, discardUnavailableImages, setText, setFiles, setImages, getSnapshot, beginSend, sending, hydrated, warning, saving } = useComposerDraft(h.key, session.id);
+  const guard = useCompositionGuard();
+  const appliedQuote = useRef<number | null>(null);
+  const unsentText = useRef("");
   const [cancelling, setCancelling] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [picker, setPicker] = useState<Picker | null>(null);
@@ -46,13 +43,14 @@ export function Composer({ h, session, busy }: { h: HostState; session: Session;
   const mentionSeq = useRef(0);
 
   useEffect(() => {
-    try {
-      if (text) sessionStorage.setItem(draftKey, text);
-      else sessionStorage.removeItem(draftKey);
-    } catch {
-      /* ignore */
-    }
-  }, [draftKey, text]);
+    if (!hydrated || !quote || appliedQuote.current === quote.id) return;
+    appliedQuote.current = quote.id;
+    const block = quote.text.replace(/\r\n?/g, "\n").split("\n").map(line => `> ${line}`).join("\n");
+    setText(current => `${current}${current ? "\n\n" : ""}${block}\n\n`);
+    setHist(null);
+    onQuoteApplied(quote.id);
+    requestAnimationFrame(() => ta.current?.focus());
+  }, [hydrated, quote, onQuoteApplied, setText]);
 
   useEffect(() => {
     const el = ta.current;
@@ -61,11 +59,11 @@ export function Composer({ h, session, busy }: { h: HostState; session: Session;
     el.style.height = `${Math.min(el.scrollHeight, 240)}px`;
   }, [text]);
 
-  useEffect(() => () => images.forEach((i) => URL.revokeObjectURL(i.url)), []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ------------------------------------------------------------ pickers
 
   const updatePicker = (value: string, caret: number) => {
+    mentionSeq.current++;
     const slash = /^\/(\S*)$/.exec(value);
     if (slash && session.commands?.length) {
       const q = slash[1];
@@ -100,6 +98,7 @@ export function Composer({ h, session, busy }: { h: HostState; session: Session;
           if (seq !== mentionSeq.current) return;
           setPicker((p) => (p?.kind === "mention" ? { ...p, items, loading: false } : p));
         } catch {
+          if (seq !== mentionSeq.current) return;
           setPicker((p) => (p?.kind === "mention" ? { ...p, items: [], loading: false } : p));
         }
       }, 120);
@@ -147,31 +146,19 @@ export function Composer({ h, session, busy }: { h: HostState; session: Session;
         setErr(`${f.name || "image"} is larger than 10 MB`);
         continue;
       }
-      const data = await readFileBase64(f);
       setImages((cur) => [
         ...cur,
-        {
-          id: Math.random().toString(36).slice(2),
-          mime_type: f.type,
-          data,
-          url: URL.createObjectURL(f),
-          name: f.name || "pasted image",
-          size: f.size,
-        },
+        { id: crypto.randomUUID(), mime_type: f.type, blob: f, name: f.name || "pasted image", size: f.size },
       ]);
     }
   };
 
-  const removeImage = (id: string) =>
-    setImages((cur) => {
-      const it = cur.find((i) => i.id === id);
-      if (it) URL.revokeObjectURL(it.url);
-      return cur.filter((i) => i.id !== id);
-    });
+  const removeImage = (id: string) => setImages(cur => cur.filter(image => image.id !== id));
 
   // ------------------------------------------------------------ history
 
-  const history = useMemo(() => promptHistory(getTimeline(h, session.id)), [h, session.id, session.turns]); // eslint-disable-line react-hooks/exhaustive-deps
+  const timeline = getTimeline(h, session.id);
+  const history = useMemo(() => promptHistory(timeline), [timeline]);
 
   const recall = (dir: -1 | 1) => {
     if (!history.length) return false;
@@ -179,13 +166,14 @@ export function Composer({ h, session, busy }: { h: HostState; session: Session;
     if (hist === null) {
       if (dir === 1) return false;
       next = history.length - 1;
+      unsentText.current = text;
     } else {
       next = hist + dir;
       if (next < 0) next = 0;
       if (next >= history.length) next = null;
     }
     setHist(next);
-    const v = next === null ? "" : history[next];
+    const v = next === null ? unsentText.current : history[next];
     setText(v);
     requestAnimationFrame(() => ta.current?.setSelectionRange(v.length, v.length));
     return true;
@@ -193,28 +181,31 @@ export function Composer({ h, session, busy }: { h: HostState; session: Session;
 
   // ------------------------------------------------------------ send
 
-  const canSend = (text.trim() || files.length || images.length) && !sending;
+  const canSend = hydrated && (text.trim() || files.length || images.length) && !sending;
 
   const send = async () => {
     if (!canSend) return;
-    setSending(true);
+    const release = beginSend();
+    if (!release) return;
     setErr(null);
-    const attachments: AttachmentIn[] = [
-      ...files.map((path) => ({ type: "file" as const, path })),
-      ...images.map((i) => ({ type: "image" as const, mime_type: i.mime_type, data: i.data })),
-    ];
+    const snapshot = getSnapshot();
     try {
-      await h.api.prompt(session.id, text.trim(), attachments);
-      setText("");
-      setFiles([]);
-      images.forEach((i) => URL.revokeObjectURL(i.url));
-      setImages([]);
-      setHist(null);
-      setPicker(null);
+      const attachments: AttachmentIn[] = [
+        ...snapshot.files.map(path => ({ type: "file" as const, path })),
+        ...await Promise.all(snapshot.images.map(async image => ({ type: "image" as const, mime_type: image.mime_type, data: await readFileBase64(new File([image.blob], image.name, { type: image.mime_type })) }))),
+      ];
+      await h.api.prompt(session.id, snapshot.text.trim(), attachments);
+      if (getSnapshot().textVersion === snapshot.textVersion) {
+        setText(current => current === snapshot.text ? "" : current);
+        setHist(null);
+        setPicker(null);
+      }
+      setFiles(current => current.filter(path => !snapshot.files.includes(path) || getSnapshot().fileTokens[path] !== snapshot.fileTokens[path]));
+      setImages(current => current.filter(image => !snapshot.images.some(sent => sent.id === image.id)));
     } catch (e) {
       setErr((e as Error).message);
     } finally {
-      setSending(false);
+      release();
       if (!isTouch()) ta.current?.focus();
     }
   };
@@ -231,7 +222,7 @@ export function Composer({ h, session, busy }: { h: HostState; session: Session;
   };
 
   const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.nativeEvent.isComposing) return;
+    if (guard(e.nativeEvent)) return;
     if (picker && picker.items.length) {
       if (e.key === "ArrowDown") {
         e.preventDefault();
@@ -254,7 +245,7 @@ export function Composer({ h, session, busy }: { h: HostState; session: Session;
       setPicker(null);
       return;
     }
-    if (e.key === "ArrowUp" && !e.shiftKey && (text === "" || (hist !== null && text === history[hist]))) {
+    if (e.key === "ArrowUp" && !e.shiftKey && (ta.current?.selectionStart === 0 || (hist !== null && text === history[hist]))) {
       if (recall(-1)) e.preventDefault();
       return;
     }
@@ -286,6 +277,12 @@ export function Composer({ h, session, busy }: { h: HostState; session: Session;
     <div className="composer">
       {session.queue?.length > 0 && <QueuePanel h={h} session={session} />}
       {err && <div className="composer-status error">{err}</div>}
+      {warning && <div className="composer-draft-warning" role="status">{warning}</div>}
+      {unavailableImages.length > 0 && <div className="composer-draft-warning" role="status">
+        {unavailableImages.length} saved image attachment(s) could not be restored and will not be sent.
+        <button type="button" className="btn btn-ghost btn-sm" onClick={discardUnavailableImages}>Remove unavailable images</button>
+      </div>}
+      {saving && <div className="composer-draft-saving" role="status">Saving draft…</div>}
       <div
         className={cx("composer-box", dragging && "dragging")}
         onDragOver={(e) => {
@@ -308,7 +305,7 @@ export function Composer({ h, session, busy }: { h: HostState; session: Session;
           <div className="attach-row">
             {images.map((i) => (
               <div key={i.id} className="thumb" title={`${i.name} · ${Math.round(i.size / 1024)} KB`}>
-                <img src={i.url} alt={i.name} />
+                <ImagePreview image={i} />
                 <button className="thumb-x" aria-label="Remove image" onClick={() => removeImage(i.id)}>
                   <IconX size={11} />
                 </button>
@@ -339,7 +336,12 @@ export function Composer({ h, session, busy }: { h: HostState; session: Session;
             onSelect={(e) => {
               if (picker?.kind === "mention") updatePicker(e.currentTarget.value, e.currentTarget.selectionStart);
             }}
-            onBlur={() => setTimeout(() => setPicker(null), 150)}
+            onBlur={() => setTimeout(() => {
+              const element = ta.current;
+              if (!element) return;
+              const active = element.ownerDocument.activeElement;
+              if (active !== element && !active?.closest(".picker")) setPicker(null);
+            }, 150)}
             onKeyDown={onKeyDown}
             onPaste={(e) => {
               const imgs = [...e.clipboardData.files].filter((f) => f.type.startsWith("image/"));
@@ -468,6 +470,7 @@ function QueueRow({ h, sid, q, index }: { h: HostState; sid: string; q: QueueIte
   const [val, setVal] = useState(q.text);
   const [busy, setBusy] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  const guard = useCompositionGuard();
   useEffect(() => {
     if (!editing) setVal(q.text);
   }, [q.text, editing]);
@@ -497,6 +500,7 @@ function QueueRow({ h, sid, q, index }: { h: HostState; sid: string; q: QueueIte
             rows={Math.min(6, Math.max(2, val.split("\n").length))}
             onChange={(e) => setVal(e.target.value)}
             onKeyDown={async (e) => {
+              if (guard(e.nativeEvent)) return;
               if (e.key === "Escape") setEditing(false);
               if (e.key === "Enter" && (e.metaKey || e.ctrlKey || !e.shiftKey) && !isTouch()) {
                 e.preventDefault();

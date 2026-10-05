@@ -11,6 +11,9 @@ import { IconBrain, IconChevron, IconDiff, IconExternal, IconFile, IconFork, Ico
 import { Modal } from "./Modal";
 import { Select } from "./Select";
 import { DiffFiles, DiffTotals, useDiff } from "./DiffView";
+import { MessageActions } from "./MessageActions";
+import "./Transcript.css";
+import { useCompositionGuard } from "../keyboard";
 
 function AttachmentImage({ h, name }: { h: HostState; name: string }) {
   const [url, setUrl] = useState<string | null>(null);
@@ -66,13 +69,14 @@ function Attachments({ h, list }: { h: HostState; list: Attachment[] }) {
   );
 }
 
-const UserBubble = memo(function UserBubble({ text, ts, h, attachments }: { text: string; ts: number; h: HostState; attachments: Attachment[] }) {
+const UserBubble = memo(function UserBubble({ text, ts, h, attachments, onQuote }: { text: string; ts: number; h: HostState; attachments: Attachment[]; onQuote: (text: string) => void }) {
   return (
     <div className="tl-user">
       <div className="bubble" title={new Date(ts).toLocaleString()}>
         <Attachments h={h} list={attachments} />
-        {text}
+        <span data-message-body>{text}</span>
       </div>
+      <MessageActions text={text} onQuote={onQuote} />
     </div>
   );
 });
@@ -337,7 +341,7 @@ function ForkDialog({ h, session, turn, onClose }: { h: HostState; session: Sess
 
 // ------------------------------------------------------------------ items
 
-function Item({ it, h, session, live }: { it: TItem; h: HostState; session: Session; live: boolean }) {
+function Item({ it, h, session, live, onQuote }: { it: TItem; h: HostState; session: Session; live: boolean; onQuote: (text: string) => void }) {
   const sid = session.id;
   const choose = useCallback(
     async (optionId: string | null) => {
@@ -349,13 +353,14 @@ function Item({ it, h, session, live }: { it: TItem; h: HostState; session: Sess
   );
   switch (it.t) {
     case "user":
-      return <UserBubble text={it.text} ts={it.ts} h={h} attachments={it.attachments} />;
+      return <UserBubble text={it.text} ts={it.ts} h={h} attachments={it.attachments} onQuote={onQuote} />;
     case "msg":
       if (it.role === "thought") return <Thought text={it.text} live={live} />;
-      if (it.role === "user") return <UserBubble text={it.text} ts={it.ts} h={h} attachments={[]} />;
+      if (it.role === "user") return <UserBubble text={it.text} ts={it.ts} h={h} attachments={[]} onQuote={onQuote} />;
       return (
         <div className="tl-agent">
-          <Markdown text={it.text} />
+          <div data-message-body><Markdown text={it.text} /></div>
+          <MessageActions text={it.text} onQuote={onQuote} />
         </div>
       );
     case "tool":
@@ -410,6 +415,7 @@ export function Timeline({
   error,
   focusEvent,
   footer,
+  onQuote,
 }: {
   items: TItem[];
   h: HostState;
@@ -418,17 +424,53 @@ export function Timeline({
   error: string | null;
   focusEvent?: number | null;
   footer?: ReactNode;
+  onQuote: (text: string) => void;
 }) {
   const ref = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
   const lastSid = useRef<string | null>(null);
   const focused = useRef<number | null>(null);
   const running = session.status === "running";
+  const guardComposition = useCompositionGuard();
+  const readingLock = useRef(false);
+  const [detached, setDetached] = useState(false);
+  const [activePrompt, setActivePrompt] = useState("");
+  const flashTimer = useRef<number | undefined>(undefined);
+  const prompts = items.filter((it) => it.t === "user" || (it.t === "msg" && it.role === "user"));
+  const activeIndex = prompts.findIndex((it) => it.key === activePrompt);
+  useEffect(() => () => window.clearTimeout(flashTimer.current), []);
+  const navigatePrompt = (key: string) => {
+    const el = ref.current;
+    const target = Array.from(el?.querySelectorAll<HTMLElement>("[data-prompt]") ?? []).find((node) => node.dataset.ev === key);
+    if (!el || !target) return;
+    stick.current = false;
+    readingLock.current = true;
+    setDetached(true);
+    setActivePrompt(key);
+    el.scrollTop += target.getBoundingClientRect().top - el.getBoundingClientRect().top - 12;
+    target.focus({ preventScroll: true });
+  };
+  const latest = () => {
+    const el = ref.current;
+    stick.current = true;
+    readingLock.current = false;
+    setDetached(false);
+    if (el) el.scrollTop = el.scrollHeight;
+    setActivePrompt(prompts.at(-1)?.key ?? "");
+  };
 
   const onScroll = () => {
     const el = ref.current;
     if (!el) return;
-    stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 120;
+    stick.current = !readingLock.current && el.scrollHeight - el.scrollTop - el.clientHeight < 120;
+    setDetached(!stick.current);
+    const top = el.getBoundingClientRect().top;
+    let key = "";
+    for (const node of el.querySelectorAll<HTMLElement>("[data-prompt]")) {
+      if (node.getBoundingClientRect().top <= top + 32) key = node.dataset.ev ?? "";
+      else break;
+    }
+    setActivePrompt(key || prompts[0]?.key || "");
   };
 
   useLayoutEffect(() => {
@@ -437,6 +479,11 @@ export function Timeline({
     if (lastSid.current !== session.id) {
       lastSid.current = session.id;
       stick.current = true;
+      readingLock.current = false;
+      focused.current = null;
+      setDetached(false);
+      setActivePrompt("");
+      window.clearTimeout(flashTimer.current);
     }
     // Jump to a search hit: the item whose first event id is the closest one at or before it.
     if (focusEvent && focused.current !== focusEvent && items.length) {
@@ -448,9 +495,12 @@ export function Timeline({
       if (target) {
         focused.current = focusEvent;
         stick.current = false;
+        readingLock.current = true;
+        setDetached(true);
         target.scrollIntoView({ block: "center" });
         target.classList.add("flash");
-        setTimeout(() => target?.classList.remove("flash"), 1600);
+        window.clearTimeout(flashTimer.current);
+        flashTimer.current = window.setTimeout(() => target?.classList.remove("flash"), 1600);
         return;
       }
     }
@@ -471,14 +521,35 @@ export function Timeline({
 
   const lastIdx = items.length - 1;
   return (
-    <div className="timeline-scroll" ref={ref} onScroll={onScroll}>
+    <div className="transcript-pane">
+      {prompts.length > 0 && <nav className="transcript-navigation" aria-label="Conversation turns">
+        <button type="button" className="transcript-step" disabled={activeIndex <= 0} onClick={() => navigatePrompt(prompts[activeIndex - 1].key)} aria-label="Previous prompt">Previous</button>
+        <Select
+          variant="field"
+          className="transcript-prompt-picker"
+          label="Go to prompt"
+          value={activePrompt}
+          display={activePrompt ? undefined : "Go to prompt…"}
+          options={prompts.map((it, index) => ({ value: it.key, label: `${index + 1}. ${it.t === "user" || it.t === "msg" ? it.text.replace(/\s+/g, " ").slice(0, 90) || "Attached prompt" : ""}` }))}
+          onChange={(key) => requestAnimationFrame(() => navigatePrompt(String(key)))}
+        />
+        <button type="button" className="transcript-step" disabled={activeIndex >= prompts.length - 1} onClick={() => navigatePrompt(prompts[activeIndex + 1].key)} aria-label="Next prompt">Next</button>
+      </nav>}
+    <div className="timeline-scroll" ref={ref} onScroll={onScroll}
+      onWheel={() => { readingLock.current = false; }}
+      onTouchStart={() => { readingLock.current = false; }}
+      onPointerDown={(event) => { if (event.target === event.currentTarget) readingLock.current = false; }}
+      onKeyDown={(event) => {
+        if (guardComposition(event.nativeEvent)) return;
+        if (["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "].includes(event.key)) readingLock.current = false;
+      }}>
       <div className="timeline">
         {loading && items.length === 0 && <div className="tl-loading">Loading history…</div>}
         {error && <div className="tl-sys error">Failed to load history: {error}</div>}
         {!loading && items.length === 0 && !error && <div className="tl-empty">No messages yet.</div>}
         {items.map((it, i) => (
-          <div key={it.key} data-ev={it.key} className="tl-item">
-            <MemoItem it={it} h={h} session={session} live={running && i === lastIdx} />
+          <div key={it.key} data-ev={it.key} data-prompt={it.t === "user" || (it.t === "msg" && it.role === "user") ? "" : undefined} tabIndex={-1} className="tl-item">
+            <MemoItem it={it} h={h} session={session} live={running && i === lastIdx} onQuote={onQuote} />
           </div>
         ))}
         {running && (
@@ -492,6 +563,8 @@ export function Timeline({
         )}
         {footer}
       </div>
+    </div>
+      {detached && <button type="button" className="transcript-latest" onClick={latest}>Jump to latest ↓</button>}
     </div>
   );
 }

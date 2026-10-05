@@ -1,0 +1,15 @@
+.composer-draft-warning {
+  padding: 7px 10px;
+  margin-bottom: 6px;
+  border: 1px solid var(--warn, #b98634);
+  border-radius: 6px;
+  color: var(--warn, #b98634);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.composer-draft-saving {
+  padding: 2px 4px 5px;
+  color: var(--text-muted, #888);
+  font-size: 11px;
+}

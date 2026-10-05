@@ -2,11 +2,13 @@ import { useCallback, useEffect, useState } from "react";
 import type { HostState } from "../store";
 import type { GitStatus, Session } from "../types";
 import { cx } from "../util";
+import { useCompositionGuard } from "../keyboard";
 import { IconBranch, IconCommit, IconExternal, IconPR, IconUpload } from "./Icons";
 import { Modal } from "./Modal";
 
 /** Git status + commit / push / PR actions for a session's worktree (Diff tab header). */
 export function GitBar({ h, session, onChanged }: { h: HostState; session: Session; onChanged: () => void }) {
+  const composing = useCompositionGuard();
   const [git, setGit] = useState<GitStatus | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
@@ -103,6 +105,7 @@ export function GitBar({ h, session, onChanged }: { h: HostState; session: Sessi
       {committing && (
         <form
           className="commit-row"
+          onKeyDown={(e) => { if (e.key === "Enter" && composing(e.nativeEvent)) e.preventDefault(); }}
           onSubmit={async (e) => {
             e.preventDefault();
             if (!msg.trim()) return;
@@ -158,10 +161,12 @@ function PrDialog({
   const [body, setBody] = useState("");
   const [draft, setDraft] = useState(false);
   const [busy, setBusy] = useState(false);
+  const composing = useCompositionGuard();
   return (
     <Modal title="Create pull request" onClose={onClose}>
       <form
         className="form"
+        onKeyDown={(e) => { if (e.key === "Enter" && composing(e.nativeEvent)) e.preventDefault(); }}
         onSubmit={async (e) => {
           e.preventDefault();
           setBusy(true);
@@ -172,7 +177,7 @@ function PrDialog({
         {dirty > 0 && <div className="form-warn">{dirty} uncommitted file{dirty === 1 ? "" : "s"} won't be in the PR. Commit first to include them.</div>}
         <label className="field">
           <span className="label">Title</span>
-          <input value={title} onChange={(e) => setTitle(e.target.value)} autoFocus />
+          <input value={title} onChange={(e) => setTitle(e.target.value)} data-modal-autofocus />
         </label>
         <label className="field">
           <span className="label">
